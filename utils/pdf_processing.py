@@ -1,6 +1,7 @@
 # utils/pdf_processing.py
-import pdfplumber
+import streamlit as st
 import pandas as pd
+import pdfplumber
 import collections
 import re
 
@@ -31,88 +32,190 @@ def make_unique_columns(columns_list):
     seen = collections.defaultdict(int)
     unique_columns = []
     for col in columns_list:
-        if not col or col.isspace(): # 處理空字串或只包含空白的字串
-            col = f"Column_{seen['']}"
-            seen[''] += 1
+        original_col_cleaned = normalize_text(col)
         
-        # 標準化欄位名稱，避免因為空白、大小寫等導致重複
-        normalized_col = normalize_text(col).replace(" ", "_").lower()
-        
-        if normalized_col in seen:
-            seen[normalized_col] += 1
-            unique_columns.append(f"{col}_{seen[normalized_col]}")
+        # 對於空字串或過短的字串，使用 'Column_X' 格式 
+        if not original_col_cleaned or len(original_col_cleaned) < 2: 
+            name_base = "Column"
+            # 確保生成的 Column_X 是在 unique_columns 中唯一的
+            current_idx = 1
+            while f"{name_base}_{current_idx}" in unique_columns:
+                current_idx += 1
+            name = f"{name_base}_{current_idx}"
         else:
-            seen[normalized_col] = 0 # 將第一次出現的計數設為0，後續重複從1開始
-            unique_columns.append(col)
+            name = original_col_cleaned
+        
+        # 處理名稱本身的重複
+        final_name = name
+        counter = seen[name]
+        # 如果當前生成的名稱已經存在於 unique_columns 中，則添加後綴
+        while final_name in unique_columns:
+            counter += 1
+            final_name = f"{name}_{counter}" 
+        
+        unique_columns.append(final_name)
+        seen[name] = counter # 更新該基礎名稱的最大計數
+
     return unique_columns
 
-def extract_tables_from_pdf(pdf_file):
+def is_grades_table(df):
     """
-    從 PDF 文件中提取所有表格，並返回 DataFrame 列表。
-    嘗試使用不同的 table_settings 來提高提取準確性。
+    判斷一個 DataFrame 是否為有效的成績單表格。
+    透過檢查是否存在預期的欄位關鍵字和數據內容模式來判斷。
+    （此函數需要 parse_credit_and_gpa，因此如果 parse_credit_and_gpa 移出，需要在此處導入）
     """
-    dfs = []
+    if df.empty or len(df.columns) < 3:
+        return False
+
+    # 將欄位名稱轉換為小寫並去除空白，以便進行不區分大小寫的匹配
+    normalized_columns = [re.sub(r'\s+', '', col).lower() for col in df.columns.tolist()]
+    
+    # 定義判斷成績表格的核心關鍵字
+    credit_keywords = ["學分", "credits", "credit", "學分數"]
+    gpa_keywords = ["gpa", "成績", "grade", "gpa(數值)"] 
+    subject_keywords = ["科目名稱", "課程名稱", "coursename", "subjectname", "科目", "課程"]
+    year_keywords = ["學年", "year"]
+    semester_keywords = ["學期", "semester"]
+
+    # 步驟1: 檢查明確的表頭關鍵字匹配
+    has_credit_col_header = any(any(k in col for k in credit_keywords) for col in normalized_columns)
+    has_gpa_col_header = any(any(k in col for k in gpa_keywords) for col in normalized_columns)
+    has_subject_col_header = any(any(k in col for k in subject_keywords) for col in normalized_columns)
+    has_year_col_header = any(any(k in col for k in year_keywords) for col in normalized_columns)
+    has_semester_col_header = any(any(k in col for k in semester_keywords) for col in normalized_columns)
+
+    if has_subject_col_header and (has_credit_col_header or has_gpa_col_header) and has_year_col_header and has_semester_col_header:
+        return True
+    
+    # 步驟2: 如果沒有明確表頭匹配，則檢查數據行的內容模式 (更具彈性)
+    potential_subject_cols = []
+    potential_credit_gpa_cols = []
+    potential_year_cols = []
+    potential_semester_cols = []
+
+    sample_rows_df = df.head(min(len(df), 20)) 
+
+    from .grade_analysis import parse_credit_and_gpa # 局部導入，避免循環依賴
+
+    for col_name in df.columns:
+        sample_data = sample_rows_df[col_name].apply(normalize_text).tolist()
+        total_sample_count = len(sample_data)
+        if total_sample_count == 0:
+            continue
+
+        subject_like_cells = sum(1 for item_str in sample_data 
+                                 if re.search(r'[\u4e00-\u9fa5]', item_str) and len(item_str) >= 2
+                                 and not item_str.isdigit() and not re.match(r'^[A-Fa-f][+\-]?$', item_str)
+                                 and not item_str.lower() in ["通過", "抵免", "pass", "exempt"])
+        if subject_like_cells / total_sample_count >= 0.4:
+            potential_subject_cols.append(col_name)
+
+        credit_gpa_like_cells = 0
+        for item_str in sample_data:
+            credit_val, gpa_val = parse_credit_and_gpa(item_str)
+            if (0.0 < credit_val <= 10.0) or (gpa_val and re.match(r'^[A-Fa-f][+\-]?$', gpa_val)) or (item_str.lower() in ["通過", "抵免", "pass", "exempt"]):
+                credit_gpa_like_cells += 1
+        if credit_gpa_like_cells / total_sample_count >= 0.4:
+            potential_credit_gpa_cols.append(col_name)
+
+        year_like_cells = sum(1 for item_str in sample_data 
+                                  if (item_str.isdigit() and (len(item_str) == 3 or len(item_str) == 4)))
+        if year_like_cells / total_sample_count >= 0.6:
+            potential_year_cols.append(col_name)
+
+        semester_like_cells = sum(1 for item_str in sample_data 
+                                  if item_str.lower() in ["上", "下", "春", "夏", "秋", "冬", "1", "2", "3", "春季", "夏季", "秋季", "冬季", "spring", "summer", "fall", "winter"])
+        if semester_like_cells / total_sample_count >= 0.6:
+            potential_semester_cols.append(col_name)
+
+    if potential_subject_cols and potential_credit_gpa_cols and potential_year_cols and potential_semester_cols:
+        return True
+
+    return False
+
+def process_pdf_file(uploaded_file):
+    """
+    使用 pdfplumber 處理上傳的 PDF 檔案，提取表格。
+    此函數內部將減少 Streamlit 的直接輸出，只返回提取的數據。
+    """
+    all_grades_data = []
+
     try:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
-                # 嘗試使用更精細的表格設定
-                # 這裡增加了一些參數，特別是 snap_vertical 和 snap_horizontal
-                # 讓 pdfplumber 更傾向於依賴偵測到的線條。
-                # 'intersection_tolerance' 調整交集容忍度，有助於更準確地識別單元格
-                # 'vertical_strategy': 'lines' 強制使用垂直線條來分割列
-                # 'horizontal_strategy': 'lines' 強制使用水平線條來分割行
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                current_page = page 
+
                 table_settings = {
-                    "vertical_strategy": "lines",  # 強制根據垂直線條來識別列
-                    "horizontal_strategy": "lines", # 強制根據水平線條來識別行
-                    "snap_tolerance": 5,           # 靠近線條的容忍度 (像素)
-                    "snap_vertical": [l.x for l in page.lines if l.width == 0],  # 使用頁面中所有垂直線的x座標
-                    "snap_horizontal": [l.y for l in page.lines if l.height == 0], # 使用頁面中所有水平線的y座標
-                    "join_tolerance": 3,           # 合併相鄰單元格的容忍度
-                    "edge_min_length": 3,          # 偵測到的線段最小長度
-                    "min_words_vertical": 0,       # 垂直方向最少有多少個詞才算是一個獨立列
-                    "min_words_horizontal": 0,     # 水平方向最少有多少個詞才算是一個獨立行
-                    "intersection_tolerance": 6    # 交集點的容忍度，用於連接線段形成單元格
+                    "vertical_strategy": "lines", 
+                    "horizontal_strategy": "lines", 
+                    "snap_tolerance": 3,  
+                    "join_tolerance": 5,  
+                    "edge_min_length": 3, 
+                    "text_tolerance": 2,  
+                    "min_words_vertical": 1, 
+                    "min_words_horizontal": 1, 
                 }
                 
-                tables = page.extract_tables(table_settings=table_settings)
-                
-                for table in tables:
-                    # 第一行通常是表頭
-                    if not table or not table[0]:
+                try:
+                    tables = current_page.extract_tables(table_settings)
+
+                    if not tables:
+                        st.info(f"頁面 **{page_num + 1}** 未偵測到表格。這可能是由於 PDF 格式複雜或表格提取設定不適用。")
                         continue
-                    
-                    header_row = [normalize_text(h) for h in table[0]]
-                    data_rows = table[1:]
-                    
-                    # 檢查 header_row 是否全是空字串
-                    if all(not h for h in header_row):
-                        # 如果表頭為空，嘗試使用第一行數據作為表頭，或者生成默認表頭
-                        if data_rows and any(normalize_text(cell) for cell in data_rows[0]):
-                            header_row = [normalize_text(cell) for cell in data_rows[0]]
-                            data_rows = data_rows[1:]
-                        else:
-                            # 仍然沒有有效表頭，生成默認欄位名
-                            header_row = [f"Column_{i}" for i in range(len(table[0]))]
 
-                    unique_headers = make_unique_columns(header_row)
-                    
-                    # 確保數據行的列數與表頭一致
-                    processed_data = []
-                    for row in data_rows:
-                        if len(row) == len(unique_headers):
-                            processed_data.append([normalize_text(cell) for cell in row])
-                        elif len(row) > len(unique_headers):
-                            # 如果數據行比表頭多列，截斷多餘的列
-                            processed_data.append([normalize_text(cell) for cell in row[:len(unique_headers)]])
-                        else:
-                            # 如果數據行比表頭少列，用空字串填充
-                            padded_row = [normalize_text(cell) for cell in row] + [''] * (len(unique_headers) - len(row))
-                            processed_data.append(padded_row)
+                    for table_idx, table in enumerate(tables):
+                        processed_table = []
+                        for row in table:
+                            normalized_row = [normalize_text(cell) for cell in row]
+                            if any(cell.strip() != "" for cell in normalized_row):
+                                processed_table.append(normalized_row)
+                        
+                        if not processed_table:
+                            st.info(f"頁面 {page_num + 1} 的表格 **{table_idx + 1}** 提取後為空。")
+                            continue
 
-                    if processed_data:
-                        df = pd.DataFrame(processed_data, columns=unique_headers)
-                        dfs.append(df)
+                        if len(processed_table) > 0 and len(processed_table[0]) >= 3: 
+                            header_row = processed_table[0]
+                            data_rows = processed_table[1:]
+                        else:
+                            st.info(f"頁面 {page_num + 1} 的表格 {table_idx + 1} 結構不完整或行數不足，已跳過。")
+                            continue
+
+                        unique_columns = make_unique_columns(header_row)
+
+                        if data_rows:
+                            num_columns_header = len(unique_columns)
+                            cleaned_data_rows = []
+                            for row in data_rows:
+                                if len(row) > num_columns_header:
+                                    cleaned_data_rows.append(row[:num_columns_header])
+                                elif len(row) < num_columns_header: 
+                                    cleaned_data_rows.append(row + [''] * (num_columns_header - len(row)))
+                                else:
+                                    cleaned_data_rows.append(row)
+
+                            try:
+                                df_table = pd.DataFrame(cleaned_data_rows, columns=unique_columns)
+                                if is_grades_table(df_table):
+                                    all_grades_data.append(df_table)
+                                    st.success(f"頁面 {page_num + 1} 的表格 {table_idx + 1} 已識別為成績單表格並已處理。")
+                                else:
+                                    st.info(f"頁面 {page_num + 1} 的表格 {table_idx + 1} (表頭範例: {header_row}) 未識別為成績單表格，已跳過。")
+                            except Exception as e_df:
+                                st.error(f"頁面 {page_num + 1} 表格 {table_idx + 1} 轉換為 DataFrame 時發生錯誤: `{e_df}`")
+                                st.error(f"原始處理後數據範例: {processed_table[:2]} (前兩行)")
+                                st.error(f"生成的唯一欄位名稱: {unique_columns}")
+                        else:
+                            st.info(f"頁面 {page_num + 1} 的表格 **{table_idx + 1}** 沒有數據行。")
+
+                except Exception as e_table:
+                    st.error(f"頁面 **{page_num + 1}** 處理表格時發生錯誤: `{e_table}`")
+                    st.warning("這可能是由於 PDF 格式複雜或表格提取設定不適用。請檢查 PDF 結構。")
+
+    except pdfplumber.PDFSyntaxError as e_pdf_syntax:
+        st.error(f"處理 PDF 語法時發生錯誤: `{e_pdf_syntax}`。檔案可能已損壞或格式不正確。")
     except Exception as e:
-        import streamlit as st
-        st.error(f"提取 PDF 表格時發生錯誤: {e}")
-    return dfs
+        st.error(f"處理 PDF 檔案時發生一般錯誤: `{e}`")
+        st.error("請確認您的 PDF 格式是否為清晰的表格。若問題持續，可能是 PDF 結構較為複雜，需要調整 `pdfplumber` 的表格提取設定。")
+
+    return all_grades_data
