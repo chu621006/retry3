@@ -119,8 +119,10 @@ def calculate_total_credits(df_list):
                 break
         for k in gpa_column_keywords:
             if k in normalized_df_columns:
-                found_gpa_column = found_gpa_column or normalized_df_columns[k] # 確保即使後面的關鍵字也能更新
-                break
+                # 使用 `or` 操作符來確保可以從多個關鍵字中找到最佳匹配
+                # 這裡如果有多個 GPA 關鍵字，它會保留第一個找到的
+                found_gpa_column = found_gpa_column or normalized_df_columns[k] 
+                break # 找到一個就夠了
         for k in year_column_keywords:
             if k in normalized_df_columns:
                 found_year_column = normalized_df_columns[k]
@@ -236,7 +238,10 @@ def calculate_total_credits(df_list):
         if found_credit_column and found_subject_column: 
             try:
                 temp_subject_name_buffer = "" # 用於累積跨行的科目名稱片段
-                current_course_data = {} # 用於暫存一個完整課程的數據
+                last_row_was_subject_fragment = False # 標記上一行是否為科目名稱片段
+                
+                # 暫存當前正在組裝的課程的所有信息 (包括學年、學期等，一旦偵測到完整課程就處理)
+                current_processing_course_info = {}
 
                 for row_idx, row in df.iterrows():
                     row_data = {col: normalize_text(row[col]) if pd.notna(row[col]) else "" for col in df.columns}
@@ -273,110 +278,102 @@ def calculate_total_credits(df_list):
                     # 判斷當前行是否是一個潛在的科目名稱片段（有中文科目名稱，但沒有學分/GPA）
                     is_potential_subject_fragment_row = (
                         current_row_subject_name_raw and len(current_row_subject_name_raw) >= 2 and
-                        re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw) and
-                        not current_row_subject_name_raw.isdigit() and # 不是純數字
-                        not re.match(r'^[A-Fa-f][+\-]?$', current_row_subject_name_raw) and # 不是字母GPA
-                        not normalize_text(current_row_subject_name_raw).lower() in ["通過", "抵免", "pass", "exempt"] # 不是通過/抵免字樣
+                        re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw) and # 包含中文
+                        not has_complete_course_info_this_row # 且不包含完整課程資訊
                     )
 
                     # --- 核心邏輯：處理科目名稱緩衝區和課程數據組裝 ---
                     if has_complete_course_info_this_row:
-                        # 如果當前行是完整的課程信息，這代表一個新課程的開始或上一個課程的延續
+                        # 情況 1: 偵測到一個完整的課程資訊行 (包含學分/GPA)
                         
-                        # 在處理新課程之前，先處理並儲存上一個可能已經組裝好的課程
-                        if current_course_data:
-                            is_failing_prev = False
-                            if current_course_data.get("GPA"):
-                                if not is_passing_gpa(current_course_data["GPA"]):
-                                    is_failing_prev = True
-                            
-                            if is_failing_prev:
-                                failed_courses.append(current_course_data)
-                            elif current_course_data.get("學分", 0) > 0 or is_passing_gpa(current_course_data.get("GPA", "")):
-                                if current_course_data.get("學分", 0) > 0:
-                                    total_credits += current_course_data["學分"]
-                                calculated_courses.append(current_course_data)
-                            
-                            current_course_data = {} # 清空，準備組裝新課程
-
-                        # 合併科目名稱：將緩衝區內容與當前行的科目名稱合併
-                        final_course_name = current_row_subject_name_raw
+                        # 首先，將之前可能累積的科目名稱片段與當前行的科目名稱合併
+                        final_subject_name = current_row_subject_name_raw
                         if temp_subject_name_buffer:
-                            final_course_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
-                            temp_subject_name_buffer = "" # 清空緩衝區，因為已使用
+                            final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
+                            
+                        # 清空緩衝區和重置標誌，為下一個課程做準備
+                        temp_subject_name_buffer = ""
+                        last_row_was_subject_fragment = False
 
-                        # 開始組裝當前行代表的新課程數據
-                        current_course_data = {
+                        # 組裝當前課程的完整信息
+                        current_processing_course_info = {
                             "學年度": "",
                             "學期": "",
-                            "科目名稱": final_course_name, 
+                            "科目名稱": final_subject_name, 
                             "學分": extracted_credit_this_row, 
                             "GPA": extracted_gpa_this_row, 
                             "來源表格": df_idx + 1
                         }
 
                         # 提取學年學期 (從當前行提取)
-                        # 這部分邏輯保持與之前相同，確保學年學期能被正確獲取
+                        # 這部分邏輯保持與之前相同
                         if found_year_column and found_year_column in row_data:
                             temp_year = row_data[found_year_column]
                             if temp_year.isdigit() and (len(temp_year) == 3 or len(temp_year) == 4):
-                                current_course_data["學年度"] = temp_year
-                        elif found_semester_column and found_semester_column in row_data: 
+                                current_processing_course_info["學年度"] = temp_year
+                        elif found_semester_column and found_semester_column in row_data: # 優先從學期欄位找學年，因為有時會合併
                             combined_val = row_data[found_semester_column]
                             year_match = re.search(r'(\d{3,4})', combined_val)
                             if year_match:
-                                current_course_data["學年度"] = year_match.group(1)
+                                current_processing_course_info["學年度"] = year_match.group(1)
                         
                         if found_semester_column and found_semester_column in row_data:
                             temp_sem = row_data[found_semester_column]
                             sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_sem, re.IGNORECASE)
                             if sem_match:
-                                current_course_data["學期"] = sem_match.group(1)
+                                current_processing_course_info["學期"] = sem_match.group(1)
 
-                        if not current_course_data["學年度"] and len(df.columns) > 0 and df.columns[0] in row_data:
+                        if not current_processing_course_info["學年度"] and len(df.columns) > 0 and df.columns[0] in row_data:
                             temp_first_col = row_data[df.columns[0]]
                             year_match = re.search(r'(\d{3,4})', temp_first_col)
                             if year_match:
-                                current_course_data["學年度"] = temp_first_col
-                            if not current_course_data["學期"]:
+                                current_processing_course_info["學年度"] = temp_first_col
+                            if not current_processing_course_info["學期"]:
                                  sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_first_col, re.IGNORECASE)
                                  if sem_match:
-                                     current_course_data["學期"] = sem_match.group(1)
+                                     current_processing_course_info["學期"] = sem_match.group(1)
 
-                        if not current_course_data["學期"] and len(df.columns) > 1 and df.columns[1] in row_data:
+                        if not current_processing_course_info["學期"] and len(df.columns) > 1 and df.columns[1] in row_data:
                             temp_second_col = row_data[df.columns[1]]
                             sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_second_col, re.IGNORECASE)
                             if sem_match:
-                                current_course_data["學期"] = sem_match.group(1)
+                                current_processing_course_info["學期"] = sem_match.group(1)
+                        
+                        # 將組裝好的課程添加到列表
+                        if extracted_gpa_this_row:
+                            if not is_passing_gpa(extracted_gpa_this_row): 
+                                failed_courses.append(current_processing_course_info)
+                            else:
+                                if extracted_credit_this_row > 0: 
+                                    total_credits += extracted_credit_this_row
+                                calculated_courses.append(current_processing_course_info)
+                        elif extracted_credit_this_row > 0: # 只有學分，沒有 GPA，也視為通過
+                            total_credits += extracted_credit_this_row
+                            calculated_courses.append(current_processing_course_info)
 
                     elif is_potential_subject_fragment_row:
-                        # 如果當前行不是完整的課程信息，但僅是科目名稱的片段，則將其添加到緩衝區
+                        # 情況 2: 當前行是科目名稱的片段 (有科目名稱，但沒有學分/GPA)
                         temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
-                        
+                        last_row_was_subject_fragment = True # 標記為科目名稱片段行
+
                     else:
-                        # 如果該行既不是完整的課程信息，也不是潛在的科目名稱片段 (例如，它是一個真正的空行，或者不相關的數據行)
-                        # 在這種情況下，我們僅僅跳過該行，**不影響緩衝區 `temp_subject_name_buffer` 的內容**。
-                        # 這確保了即使科目名稱片段之間有空行，緩衝區也不會被錯誤清空。
-                        continue
-                
-                # 處理循環結束後可能存在的最後一個課程或剩餘的緩衝區內容
-                # 這部分邏輯保持不變，因為它處理的是在文件末尾可能未被添加到列表的課程
-                if current_course_data:
-                    is_failing_last = False
-                    if current_course_data.get("GPA"):
-                        if not is_passing_gpa(current_course_data["GPA"]):
-                            is_failing_last = True
-                    
-                    if is_failing_last:
-                        failed_courses.append(current_course_data)
-                    elif current_course_data.get("學分", 0) > 0 or is_passing_gpa(current_course_data.get("GPA", "")):
-                        if current_course_data.get("學分", 0) > 0:
-                            total_credits += current_course_data["學分"]
-                        calculated_courses.append(current_course_data)
-                
+                        # 情況 3: 既不是完整的課程資訊行，也不是科目名稱片段行 (例如，空行、表格結尾的統計行等)
+                        # 如果緩衝區有內容，但沒有遇到完整的課程資訊行來“關閉”它，則表示該片段可能不屬於任何完整課程，應清空並警告。
+                        if temp_subject_name_buffer:
+                            # 由於 Streamlit 在這個環境中可能無法直接訪問，暫時註釋掉 st.warning
+                            # import streamlit as st
+                            # st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱片段: '{temp_subject_name_buffer}'，由於缺乏學分/GPA信息，已跳過。")
+                            pass # 移除警告，避免混淆，因為有些表格結構確實可能導致合法片段沒有被完整課程行「關閉」
+
+                        temp_subject_name_buffer = "" # 清空緩衝區
+                        last_row_was_subject_fragment = False # 重置標誌
+
+                # 循環結束後，理論上 temp_subject_name_buffer 應該是空的，
+                # 如果有殘餘，說明文件末尾有未完成的課程片段
                 if temp_subject_name_buffer:
-                    import streamlit as st
-                    st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱: '{temp_subject_name_buffer}'，由於缺乏學分/GPA信息，已跳過。")
+                    # import streamlit as st
+                    # st.warning(f"表格 {df_idx + 1} 偵測到文件末尾未完成的科目名稱片段: '{temp_subject_name_buffer}'，已跳過。")
+                    pass # 移除警告
 
             except Exception as e:
                 import streamlit as st # 確保 streamlit 可用
