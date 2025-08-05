@@ -45,7 +45,6 @@ def parse_credit_and_gpa(text):
     text_clean = normalize_text(text)
     
     if text_clean.lower() in ["通過", "抵免", "pass", "exempt"]:
-        # 對於通過或抵免的科目，學分通常為0（或依實際學分數計，但這裡我們保持為0.0，因為不直接計入總學分）
         return 0.0, text_clean
 
     match_gpa_credit = re.match(r'([A-Fa-f][+\-]?)\s*(\d+(\.\d+)?)', text_clean)
@@ -93,9 +92,13 @@ def calculate_total_credits(df_list):
     credit_column_keywords = ["學分", "學分數", "學分(GPA)", "學 分", "Credits", "Credit", "學分數(學分)"] 
     subject_column_keywords = ["科目名稱", "課程名稱", "Course Name", "Subject Name", "科目", "課程"] 
     gpa_column_keywords = ["GPA", "成績", "Grade", "gpa(數值)"] 
-    year_column_keywords = ["學年", "year", "學 年"]
+    year_column_keywords = ["學年", "year", "學 年", "學年度"] # 增加學年度
     semester_column_keywords = ["學期", "semester", "學 期"]
     
+    # 新增選課代號的關鍵字，用於更精確判斷新課程
+    course_code_column_keywords = ["選課代號", "Course Code", "Code", "選課 代號"]
+
+
     for df_idx, df in enumerate(df_list):
         if df.empty or len(df.columns) < 3:
             continue
@@ -105,7 +108,8 @@ def calculate_total_credits(df_list):
         found_gpa_column = None 
         found_year_column = None
         found_semester_column = None
-        
+        found_course_code_column = None # 新增選課代號欄位
+
         # 步驟 1: 優先匹配明確的表頭關鍵字
         normalized_df_columns = {re.sub(r'\s+', '', col_name).lower(): col_name for col_name in df.columns}
         
@@ -129,6 +133,10 @@ def calculate_total_credits(df_list):
             if k in normalized_df_columns:
                 found_semester_column = normalized_df_columns[k]
                 break
+        for k in course_code_column_keywords: # 匹配選課代號欄位
+            if k in normalized_df_columns:
+                found_course_code_column = normalized_df_columns[k]
+                break
 
         # 步驟 2: 如果沒有明確匹配，則回退到根據數據內容猜測欄位
         potential_credit_cols = []
@@ -136,6 +144,7 @@ def calculate_total_credits(df_list):
         potential_gpa_cols = []
         potential_year_cols = []
         potential_semester_cols = []
+        potential_course_code_cols = [] # 潛在的選課代號欄位
 
         sample_rows_df = df.head(min(len(df), 20)) 
 
@@ -155,18 +164,16 @@ def calculate_total_credits(df_list):
 
             subject_vals_found = 0
             for item_str in sample_data:
-                # 判斷是否為看起來像中文科目名稱的字符串
                 if re.search(r'[\u4e00-\u9fa5]', item_str) and len(item_str) >= 2 and \
                    not item_str.isdigit() and not re.match(r'^[A-Fa-f][+\-]?$', item_str) and \
                    not item_str.lower() in ["通過", "抵免", "pass", "exempt"] and \
-                   not re.match(r'^\d{3,4}$', item_str): # 排除單純的學年數字
+                   not re.match(r'^\d{3,4}$', item_str) and not re.match(r'^\w{2,5}$', item_str): # 排除選課代號
                     subject_vals_found += 1
             if subject_vals_found / total_sample_count >= 0.4:
                 potential_subject_cols.append(col_name)
 
             gpa_vals_found = 0
             for item_str in sample_data:
-                # 檢查是否為字母GPA、數字或通過/抵免字樣
                 if re.match(r'^[A-Fa-f][+\-]?$', item_str) or (item_str.replace('.', '', 1).isdigit() and len(item_str) <=5) or item_str.lower() in ["通過", "抵免", "pass", "exempt"]: 
                     gpa_vals_found += 1
             if gpa_vals_found / total_sample_count >= 0.4:
@@ -185,54 +192,60 @@ def calculate_total_credits(df_list):
                     semester_vals_found += 1
             if semester_vals_found / total_sample_count >= 0.6: 
                 potential_semester_cols.append(col_name)
+            
+            course_code_vals_found = 0
+            for item_str in sample_data:
+                # 簡單的數字或數字加字母組合，長度3-5之間
+                if re.match(r'^\w{3,5}$', item_str) and not (item_str.isdigit() and len(item_str) in [3,4]): # 排除純學年
+                    course_code_vals_found += 1
+            if course_code_vals_found / total_sample_count >= 0.4:
+                potential_course_code_cols.append(col_name)
 
-        # 根據推斷結果確定學分、科目、GPA、學年、學期欄位
-        if not found_year_column and potential_year_cols:
-            found_year_column = sorted(potential_year_cols, key=lambda x: df.columns.get_loc(x))[0]
-        if not found_semester_column and potential_semester_cols:
-            if found_year_column:
-                year_col_idx = df.columns.get_loc(found_year_column)
-                candidates = [col for col in potential_semester_cols if df.columns.get_loc(col) > year_col_idx]
-                if candidates:
-                    found_semester_column = sorted(candidates, key=lambda x: df.columns.get_loc(x))[0]
-                elif potential_semester_cols:
-                    found_semester_column = potential_semester_cols[0]
-            else:
-                found_semester_column = sorted(potential_semester_cols, key=lambda x: df.columns.get_loc(x))[0]
 
-        if not found_subject_column and potential_subject_cols:
-            if found_semester_column:
-                sem_col_idx = df.columns.get_loc(found_semester_column)
-                candidates = [col for col in potential_subject_cols if df.columns.get_loc(col) > sem_col_idx]
-                if candidates:
-                    found_subject_column = sorted(candidates, key=lambda x: df.columns.get_loc(x))[0]
-                elif potential_subject_cols:
-                    found_subject_column = potential_subject_cols[0]
-            else:
-                found_subject_column = sorted(potential_subject_cols, key=lambda x: df.columns.get_loc(x))[0]
+        # 根據推斷結果確定欄位，考慮列的順序
+        def get_best_col(potentials, reference_col_idx=None, df_cols=df.columns):
+            if not potentials:
+                return None
+            if reference_col_idx is None:
+                return sorted(potentials, key=lambda x: df_cols.get_loc(x))[0]
+            
+            # 優先找在參考欄位之後的欄位
+            after_ref_candidates = [col for col in potentials if df_cols.get_loc(col) > reference_col_idx]
+            if after_ref_candidates:
+                return sorted(after_ref_candidates, key=lambda x: df_cols.get_loc(x))[0]
+            # 如果參考欄位之後沒有，就找之前的
+            return sorted(potentials, key=lambda x: df_cols.get_loc(x))[0]
 
-        if not found_credit_column and potential_credit_cols:
-            if found_subject_column:
-                subject_col_idx = df.columns.get_loc(found_subject_column)
-                candidates = [col for col in potential_credit_cols if df.columns.get_loc(col) > subject_col_idx]
-                if candidates:
-                    found_credit_column = sorted(candidates, key=lambda x: df.columns.get_loc(x))[0]
-                elif potential_credit_cols:
-                    found_credit_column = potential_credit_cols[0]
-            else:
-                found_credit_column = sorted(potential_credit_cols, key=lambda x: df.columns.get_loc(x))[0]
+        if not found_year_column:
+            found_year_column = get_best_col(potential_year_cols)
+        
+        year_idx = df.columns.get_loc(found_year_column) if found_year_column else None
 
-        if not found_gpa_column and potential_gpa_cols:
-            if found_credit_column:
-                credit_col_idx = df.columns.get_loc(found_credit_column)
-                candidates = [col for col in potential_gpa_cols if df.columns.get_loc(col) > credit_col_idx]
-                if candidates:
-                    found_gpa_column = sorted(candidates, key=lambda x: df.columns.get_loc(x))[0]
-                elif potential_gpa_cols:
-                    found_gpa_column = potential_gpa_cols[0]
-            else:
-                found_gpa_column = sorted(potential_gpa_cols, key=lambda x: df.columns.get_loc(x))[0]
+        if not found_semester_column:
+            found_semester_column = get_best_col(potential_semester_cols, year_idx)
 
+        sem_idx = df.columns.get_loc(found_semester_column) if found_semester_column else None
+
+        if not found_course_code_column: # 決定選課代號
+            found_course_code_column = get_best_col(potential_course_code_cols, sem_idx)
+
+        code_idx = df.columns.get_loc(found_course_code_column) if found_course_code_column else None
+
+        if not found_subject_column:
+            found_subject_column = get_best_col(potential_subject_cols, code_idx) # 科目名稱應在選課代號之後
+
+        subject_idx = df.columns.get_loc(found_subject_column) if found_subject_column else None
+
+        if not found_credit_column:
+            found_credit_column = get_best_col(potential_credit_cols, subject_idx)
+
+        credit_idx = df.columns.get_loc(found_credit_column) if found_credit_column else None
+
+        if not found_gpa_column:
+            found_gpa_column = get_best_col(potential_gpa_cols, credit_idx)
+
+
+        # 確保找到了至少科目名稱和學分欄位
         if found_credit_column and found_subject_column: 
             try:
                 temp_subject_name_buffer = "" # 用於累積跨行的科目名稱片段
@@ -243,21 +256,21 @@ def calculate_total_credits(df_list):
                     current_row_subject_name_raw = row_data.get(found_subject_column, "")
                     credit_col_content = row_data.get(found_credit_column, "")
                     gpa_col_content = row_data.get(found_gpa_column, "")
+                    year_col_content = row_data.get(found_year_column, "") # 學年度內容
+                    semester_col_content = row_data.get(found_semester_column, "") # 學期內容
+                    course_code_col_content = row_data.get(found_course_code_column, "") # 選課代號內容
 
                     extracted_credit_this_row, extracted_gpa_this_row = 0.0, ""
 
-                    # 從學分欄位提取學分和潛在的 GPA (當前行的數據)
                     parsed_credit_from_credit_col, parsed_gpa_from_credit_col = parse_credit_and_gpa(credit_col_content)
                     if parsed_credit_from_credit_col > 0:
                         extracted_credit_this_row = parsed_credit_from_credit_col
                     if parsed_gpa_from_credit_col:
                         extracted_gpa_this_row = parsed_gpa_from_credit_col
 
-                    # 從 GPA 欄位提取 GPA（優先使用，因為可能更準確）
                     parsed_credit_from_gpa_col, parsed_gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content)
                     if parsed_gpa_from_gpa_col:
                         extracted_gpa_this_row = parsed_gpa_from_gpa_col.upper()
-                    # 如果 GPA 欄位也包含學分信息且主學分欄位沒有提取到學分，則補充
                     if parsed_credit_from_gpa_col > 0 and extracted_credit_this_row == 0.0:
                         extracted_credit_this_row = parsed_credit_from_gpa_col
                     
@@ -270,17 +283,40 @@ def calculate_total_credits(df_list):
                     )
                     
                     # 判斷當前行是否是一個潛在的科目名稱片段（有中文科目名稱，但沒有學分/GPA）
+                    # 更加嚴格判斷：如果科目名稱欄位內容是數字且長度為3或4，很可能是學年，不是科目名稱片段
                     is_potential_subject_fragment_row = (
                         current_row_subject_name_raw and len(current_row_subject_name_raw) >= 2 and
                         re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw) and 
-                        not has_complete_course_info_this_row # 且不包含完整課程資訊
+                        not has_complete_course_info_this_row and # 且不包含完整課程資訊
+                        not (current_row_subject_name_raw.isdigit() and len(current_row_subject_name_raw) in [3,4]) and # 排除學年數字
+                        not re.match(r'^\w{3,5}$', current_row_subject_name_raw) # 排除選課代號樣式的字符串
                     )
 
+                    # 新增判斷：當前行是否極有可能是一個新課程的開始
+                    # 條件：有學年度或學期，或有選課代號，且科目名稱欄位不為空且看起來像科目名稱
+                    is_row_likely_new_course_start = (
+                        (year_col_content and year_col_content.isdigit() and len(year_col_content) in [3,4]) or
+                        (semester_col_content and re.search(r'(上|下|春|夏|秋|冬|1|2|3)', semester_col_content)) or
+                        (course_code_col_content and re.match(r'^\w{3,5}$', course_code_col_content))
+                    ) and current_row_subject_name_raw and re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw)
+                    
                     # --- 核心邏輯：處理科目名稱緩衝區和課程數據組裝 ---
+                    
+                    # 優先判斷是否是新課程的開始，這會強制清空緩衝區
+                    if is_row_likely_new_course_start and not is_potential_subject_fragment_row:
+                        # 如果當前行明確是一個新課程的開始，並且它不是一個純粹的科目名稱片段（它有完整的開頭信息）
+                        # 則清空之前所有的緩衝區，因為它屬於前一個可能未完成的課程
+                        if temp_subject_name_buffer:
+                            # 警告，表示之前的科目片段沒有被完整課程行「關閉」
+                            # import streamlit as st
+                            # st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱片段: '{temp_subject_name_buffer}'，被新課程開頭中斷，已跳過。")
+                            pass
+                        temp_subject_name_buffer = "" # 強制清空緩衝區
+                    
                     if has_complete_course_info_this_row:
                         # 情況 1: 偵測到一個完整的課程資訊行 (包含學分/GPA)
                         
-                        # 這是處理一個完整課程的邏輯。首先，組合科目名稱。
+                        # 首先，將之前可能累積的科目名稱片段與當前行的科目名稱合併
                         final_subject_name = current_row_subject_name_raw
                         if temp_subject_name_buffer:
                             final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
@@ -288,26 +324,24 @@ def calculate_total_credits(df_list):
                         # 重要：在處理完一個課程後，立即清空緩衝區，避免污染下一個課程
                         temp_subject_name_buffer = "" 
 
-                        # 提取學年學期 (從當前行提取)
-                        # 這部分邏輯保持與之前相同
-                        acad_year = ""
-                        semester = ""
-                        if found_year_column and found_year_column in row_data:
-                            temp_year = row_data[found_year_column]
-                            if temp_year.isdigit() and (len(temp_year) == 3 or len(temp_year) == 4):
-                                acad_year = temp_year
-                        elif found_semester_column and found_semester_column in row_data: 
-                            combined_val = row_data[found_semester_column]
-                            year_match = re.search(r'(\d{3,4})', combined_val)
-                            if year_match:
-                                acad_year = year_match.group(1)
+                        # 提取學年學期等信息
+                        acad_year = year_col_content
+                        semester = semester_col_content
                         
-                        if found_semester_column and found_semester_column in row_data:
-                            temp_sem = row_data[found_semester_column]
-                            sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_sem, re.IGNORECASE)
-                            if sem_match:
-                                semester = sem_match.group(1)
+                        # 如果學年學期欄位是空的，但科目名稱或選課代號欄位含有這些信息，嘗試從那裡提取
+                        if not acad_year and found_course_code_column and found_course_code_column in row_data:
+                            match = re.search(r'^(\d{3,4})', row_data[found_course_code_column])
+                            if match:
+                                acad_year = match.group(1)
 
+                        if not acad_year and found_subject_column and found_subject_column in row_data:
+                            match = re.search(r'^(\d{3,4})\s*(上|下|春|夏|秋|冬|1|2|3)?', row_data[found_subject_column])
+                            if match:
+                                acad_year = match.group(1)
+                                if match.group(2) and not semester:
+                                    semester = match.group(2)
+
+                        # 進一步從其他列或第一列/第二列尋找學年學期
                         if not acad_year and len(df.columns) > 0 and df.columns[0] in row_data:
                             temp_first_col = row_data[df.columns[0]]
                             year_match = re.search(r'(\d{3,4})', temp_first_col)
@@ -322,8 +356,8 @@ def calculate_total_credits(df_list):
                             temp_second_col = row_data[df.columns[1]]
                             sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_second_col, re.IGNORECASE)
                             if sem_match:
-                                semester = sem_match.group(1)
-                        
+                                semester = sem_second_col # 直接使用匹配到的值
+
                         # 組裝課程數據並添加到列表
                         course_info = {
                             "學年度": acad_year,
@@ -356,7 +390,7 @@ def calculate_total_credits(df_list):
                         if temp_subject_name_buffer:
                             # 由於 Streamlit 在這個環境中可能無法直接訪問，暫時註釋掉 st.warning
                             # import streamlit as st
-                            # st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱片段: '{temp_subject_name_buffer}'，由於缺乏學分/GPA信息，已跳過。")
+                            # st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱片段: '{temp_subject_name_buffer}'，被非課程行中斷，已跳過。")
                             pass 
                         temp_subject_name_buffer = "" # 強制清空緩衝區
                         
