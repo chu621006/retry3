@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 from utils.pdf_processing import process_pdf_file
@@ -18,8 +19,8 @@ def main():
             extracted_dfs = process_pdf_file(uploaded_file)
 
         if extracted_dfs:
-            # 最佳實踐：永遠解包三個值
             try:
+                # 這裡只允許解包三個值，若有錯會顯示 error
                 total_credits, calculated_courses, failed_courses = calculate_total_credits(extracted_dfs)
             except Exception as e:
                 st.error(f"學分計算階段出現錯誤: {e}")
