@@ -22,7 +22,7 @@ def make_unique_columns(columns_list):
     unique = []
     for col in columns_list:
         name = normalize_text(col)
-        if not name or len(name) < 2:
+        if len(name) < 2:
             base = "Column"
             i = 1
             while f"{base}_{i}" in unique:
@@ -40,13 +40,12 @@ def make_unique_columns(columns_list):
 def is_grades_table(df):
     if df.empty or df.shape[1] < 3:
         return False
-    cols = [re.sub(r"\s+", "", c).lower() for c in df.columns]
+    low = [re.sub(r"\s+", "", c).lower() for c in df.columns]
     return (
-        any("科目" in c or "subject" in c for c in cols)
-        and (any("學分" in c or "credit" in c for c in cols)
-             or any("gpa" in c or "成績" in c for c in cols))
-        and any("學年" in c or "year" in c for c in cols)
-        and any("學期" in c or "semester" in c for c in cols)
+        any("科目" in c or "subject" in c for c in low) and
+        (any("學分" in c or "credit" in c for c in low) or any("gpa" in c or "成績" in c for c in low)) and
+        any("學年" in c or "year" in c for c in low) and
+        any("學期" in c or "semester" in c for c in low)
     )
 
 def process_pdf_file(uploaded_file):
@@ -101,11 +100,7 @@ def process_pdf_file(uploaded_file):
                     except:
                         continue
 
-        # 【关键修正】如果有任何表格被正常抽取，直接返回它们
-        if table_dfs:
-            return table_dfs
-
-        # 否则才启用一次性全文 Regex fallback
+        # 无论是否有 table_dfs，都尝试一次 Regex fallback，补全漏掉的课程
         pattern = re.compile(
             r"(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)",
             re.UNICODE
@@ -125,13 +120,13 @@ def process_pdf_file(uploaded_file):
                 all_rows,
                 columns=["學年度", "學期", "科目名稱", "學分", "GPA"]
             )
-            st.success("Regex fallback 已處理整份 PDF，优先返回此结果。")
-            return [regex_df]
+            st.info("⚡ Regex fallback 補全課程資料")
+            # 把 regex_df 插到列表最後，calculate_total_credits 会去重
+            table_dfs.append(regex_df)
 
     except pdfplumber.PDFSyntaxError as e:
         st.error(f"PDF 語法錯誤: {e}")
     except Exception as e:
         st.error(f"處理 PDF 時發生錯誤: {e}")
 
-    # 最后回傳空列表（无表格也无 regex 匹配）
-    return []
+    return table_dfs
