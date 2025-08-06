@@ -231,43 +231,16 @@ def calculate_total_credits(df_list):
                         not (len(current_row_subject_name_raw) <=3 and not re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw)) # Avoid very short non-Chinese fragments
                     )
 
-                    # --- State machine logic (New Year signal is highest priority) ---
-                    # New: If a 3 or 4 digit number is found in the '學年度' column, it's a strong new course signal.
-                    is_new_year_signal = (
-                        year_col_content and re.match(r'^\d{3,4}$', year_col_content)
+                    # Define if this row is a strong signal for a new course block start (e.g., new academic year row)
+                    is_row_a_strong_new_course_start_signal = (
+                        is_valid_subject_fragment_text and # The row itself must contain something subject-like
+                        (year_col_content and re.match(r'^\d{3,4}$', year_col_content)) # Academic year number
                     )
 
-                    if is_new_year_signal:
-                        # Case 1: New academic year detected. Force clear buffer to prevent pollution.
-                        if temp_subject_name_buffer:
-                            # If there was a buffered subject, it implies a previous multi-line course wasn't finalized.
-                            # We discard it to prevent pollution of the new academic year's courses.
-                            temp_subject_name_buffer = ""
-                        
-                        # Now, if the current row also has complete course info, process it.
-                        # This covers cases where the first row of a new year also contains course details.
-                        if has_complete_course_info_this_row:
-                            final_subject_name = current_row_subject_name_raw # No buffer for new year's first course unless it's itself multi-line
-                            
-                            acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
-                            course_info = {
-                                "學年度": acad_year, "學期": semester, "科目名稱": final_subject_name, 
-                                "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
-                            }
-                            if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
-                            else:
-                                if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
-                                calculated_courses.append(course_info)
-                            # Buffer is already clear from is_new_year_signal check.
-                            
-                        # If the new year signal is present, and it's not a complete course row,
-                        # but it's a valid subject fragment, start buffering for this new year.
-                        elif is_valid_subject_fragment_text:
-                            temp_subject_name_buffer = current_row_subject_name_raw
 
-
-                    elif has_complete_course_info_this_row:
-                        # Case 2: This row completes a course (no new year signal, or new year signal handled above).
+                    # --- State machine logic ---
+                    if has_complete_course_info_this_row:
+                        # Case 1: This row has full course info. Finalize subject name using buffer.
                         final_subject_name = current_row_subject_name_raw
                         if temp_subject_name_buffer:
                             final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
@@ -285,14 +258,24 @@ def calculate_total_credits(df_list):
                         
                         temp_subject_name_buffer = "" # CRITICAL: Clear buffer immediately after finalizing a course.
 
+                    elif is_row_a_strong_new_course_start_signal:
+                        # Case 2: This row indicates a strong new course start (e.g., new academic year).
+                        # IMPORTANT: Clear any previous buffered subject to prevent pollution.
+                        if temp_subject_name_buffer:
+                            temp_subject_name_buffer = ""
+                        
+                        # Start a new buffer with the current row's subject name, as it's the start of a new block.
+                        # (is_row_a_strong_new_course_start_signal already implies is_valid_subject_fragment_text)
+                        temp_subject_name_buffer = current_row_subject_name_raw
+
                     elif is_valid_subject_fragment_text:
-                        # Case 3: This row is a valid subject fragment, but doesn't complete a course,
-                        # and no new year signal was detected. Append to buffer.
+                        # Case 3: This row is a valid subject fragment, but not a full course, and not a strong new start.
+                        # Append it to the current buffer.
                         temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
                         
                     else:
-                        # Case 4: Irrelevant row (not a course completion, not a valid subject fragment, no new year signal).
-                        # Clear buffer to prevent contamination from unrelated text.
+                        # Case 4: Irrelevant row (not a complete course, not a strong new start, not a valid fragment).
+                        # Clear buffer to prevent any accumulated noise.
                         if temp_subject_name_buffer:
                             temp_subject_name_buffer = "" 
                         
