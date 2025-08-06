@@ -177,55 +177,30 @@ def calculate_total_credits(df_list):
         # Main parsing loop
         if found_credit_column and found_subject_column: # Essential columns must be found
             try:
-                temp_subject_name_buffer = "" 
-
                 for row_idx, row in df.iterrows():
                     row_data = {col: normalize_text(row[col]) if pd.notna(row[col]) else "" for col in df.columns}
 
                     current_row_subject_name_raw = row_data.get(found_subject_column, "")
                     credit_col_content = row_data.get(found_credit_column, "")
                     gpa_col_content = row_data.get(found_gpa_column, "")
-                    year_col_content = row_data.get(found_year_column, "") 
-                    semester_col_content = row_data.get(found_semester_column, "") 
-                    course_code_col_content = row_data.get(found_course_code_column, "") 
-
+                    
                     # Extract credit and GPA from their respective columns
                     extracted_credit_this_row, extracted_gpa_this_row = parse_credit_and_gpa(credit_col_content)
                     _, gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content) 
                     if gpa_from_gpa_col: extracted_gpa_this_row = gpa_from_gpa_col.upper()
                     
                     # Does this row contain enough info to be a complete course entry?
+                    # This is the ONLY condition for processing a course.
                     has_complete_course_info_this_row = (
                         extracted_credit_this_row > 0 or 
-                        is_passing_gpa(extracted_gpa_this_row) or # Also consider GPA itself as a completion signal
-                        normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"] or # Keywords as completion
+                        is_passing_gpa(extracted_gpa_this_row) or 
+                        normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"] or 
                         normalize_text(gpa_col_content).lower() in ["通過", "抵免", "pass", "exempt"]
                     )
                     
-                    # Does this row contain strong signals for a *new* course starting?
-                    # This is now used to *clear* buffer if the *current row itself* doesn't seem to be a fragment.
-                    is_strong_new_course_signal = (
-                        (year_col_content and year_col_content.isdigit() and len(year_col_content) in [3,4]) or 
-                        (semester_col_content and re.search(r'(上|下|春|夏|秋|冬|1|2|3)', semester_col_content)) or
-                        (course_code_col_content and re.match(r'^\w{3,5}$', course_code_col_content)) 
-                    )
-
-                    # Is the text in the subject column a valid-looking part of a subject name?
-                    # It should contain Chinese characters, be reasonably long, and not purely numeric/alphanumeric code.
-                    is_valid_subject_fragment_text = (
-                        current_row_subject_name_raw and len(current_row_subject_name_raw) >= 2 and
-                        re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw) and 
-                        not (current_row_subject_name_raw.isdigit() and len(current_row_subject_name_raw) in [3,4]) and 
-                        not re.match(r'^\w{3,5}$', current_row_subject_name_raw) and
-                        not (len(current_row_subject_name_raw) <=3 and not re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw)) # Avoid very short non-Chinese fragments
-                    )
-
-                    # --- State machine logic ---
                     if has_complete_course_info_this_row:
-                        # Case 1: This row completes a course. Finalize subject name.
-                        final_subject_name = current_row_subject_name_raw
-                        if temp_subject_name_buffer:
-                            final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
+                        # If it's a complete course row, process it using the subject name from *this* row.
+                        final_subject_name = current_row_subject_name_raw # Direct use, no buffering/concatenation
                         
                         # Extract academic year and semester for the completed course
                         acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
@@ -239,41 +214,11 @@ def calculate_total_credits(df_list):
                         else:
                             if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
                             calculated_courses.append(course_info)
-                        
-                        temp_subject_name_buffer = "" # Clear buffer after a course is finalized.
-
-                    elif is_strong_new_course_signal and not is_valid_subject_fragment_text:
-                        # Case 2: This row has a strong new course signal AND its subject name does NOT look like a valid fragment.
-                        # This typically means it's a definite new course, and any buffered subject was incomplete/noise.
-                        if temp_subject_name_buffer:
-                            temp_subject_name_buffer = "" # Discard previous incomplete buffer
-                        # We don't add the current_row_subject_name_raw to buffer here, because it was explicitly
-                        # determined *not* to be a valid subject fragment text. This prevents pollution.
-                        
-                    elif is_valid_subject_fragment_text:
-                        # Case 3: Current row is a subject fragment. Append to buffer.
-                        # This happens if it doesn't complete a course (Case 1) and isn't a strong, non-fragment new course signal (Case 2).
-                        temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
-                        
-                    else:
-                        # Case 4: Irrelevant row. Clear buffer if any.
-                        # This covers rows that are neither a completion, nor a strong new course signal (that's not a fragment), nor a valid fragment.
-                        if temp_subject_name_buffer:
-                            temp_subject_name_buffer = "" 
-                        
-                # After iterating through all rows in a DataFrame, check if there's any lingering subject fragment
-                if temp_subject_name_buffer:
-                    # In a real application, you might want to log this or try to salvage it.
-                    # For now, we just pass, as it's an incomplete entry at the end of a table.
-                    # st.warning(f"表格 {df_idx + 1} 偵測到文件末尾未完成的科目名稱片段: '{temp_subject_name_buffer}'，已跳過。")
-                    pass 
-
+                    # Rows without complete course info are simply ignored, no buffering
             except Exception as e:
                 import streamlit as st 
-                # Display a warning for the specific DataFrame if an error occurs during parsing its rows
                 st.warning(f"表格 {df_idx + 1} 的學分計算時發生錯誤: `{e}`。該表格的學分可能無法計入總數。請檢查學分和GPA欄位數據是否正確。錯誤訊息: `{e}`")
         else:
-            # If essential columns (credit or subject) are not found for a DataFrame, skip it silently or with a debug message
             pass 
             
     return total_credits, calculated_courses, failed_courses
