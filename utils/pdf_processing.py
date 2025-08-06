@@ -5,7 +5,6 @@ import pandas as pd
 import pdfplumber
 import collections
 import re
-from .grade_analysis import parse_credit_and_gpa  # 用到 normalize_text、parse_credit_and_gpa
 
 def normalize_text(cell_content):
     if cell_content is None:
@@ -41,7 +40,6 @@ def make_unique_columns(columns_list):
     return unique_columns
 
 def is_grades_table(df):
-    # (保持你原本的判斷邏輯)
     if df.empty or len(df.columns) < 3:
         return False
     normalized_columns = [re.sub(r'\s+', '', c).lower() for c in df.columns]
@@ -76,11 +74,10 @@ def process_pdf_file(uploaded_file):
                     "min_words_horizontal": 1,
                 }
 
-                # 嘗試用 extract_tables
+                # 優先用 extract_tables
                 tables = page.extract_tables(table_settings)
                 if tables:
                     for tidx, table in enumerate(tables):
-                        # 清洗 table
                         rows = []
                         for row in table:
                             norm = [normalize_text(c) for c in row]
@@ -102,22 +99,20 @@ def process_pdf_file(uploaded_file):
                             df = pd.DataFrame(cleaned, columns=cols)
                             if is_grades_table(df):
                                 all_grades_data.append(df)
-                                st.success(f"頁面 {page_num+1} 的表格 {tidx+1} 已識別並處理。")
+                                st.success(f"頁面 {page_num+1} 表格 {tidx+1} 已識別並處理。")
                         except Exception:
                             continue
+
                 else:
-                    # fallback: 純文字解析學年度/學期/科目/學分/GPA
+                    # fallback 純文字解析
                     text = page.extract_text()
                     if text and "學年度" in text and "GPA" in text:
-                        # 逐行分割
                         lines = [normalize_text(l) for l in text.splitlines() if normalize_text(l)]
-                        # 找到 header 行
                         for idx, line in enumerate(lines):
                             if re.search(r'學年度.*學分.*GPA', line):
                                 hdr = re.split(r'\s{2,}', line)
                                 data = []
                                 for row in lines[idx+1:]:
-                                    # 一般 data 行會以學年度開頭 (3或4位數)
                                     if not re.match(r'^\d{3,4}\s', row):
                                         break
                                     parts = re.split(r'\s{2,}', row)
@@ -129,6 +124,7 @@ def process_pdf_file(uploaded_file):
                                     all_grades_data.append(df)
                                     st.success(f"頁面 {page_num+1} 純文字解析已處理。")
                                 break
+
     except pdfplumber.PDFSyntaxError as e:
         st.error(f"PDF 語法錯誤: {e}")
     except Exception as e:
