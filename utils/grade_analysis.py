@@ -1,4 +1,3 @@
-# utils/grade_analysis.py
 import pandas as pd
 import re
 from .pdf_processing import normalize_text
@@ -55,6 +54,7 @@ def parse_credit_and_gpa(text):
     return 0.0, ""
 
 def calculate_total_credits(df_list):
+    print("【DEBUG】這是目前正確的 grade_analysis.py 被呼叫")
     total_credits = 0.0
     calculated_courses = []
     failed_courses = []
@@ -97,10 +97,6 @@ def calculate_total_credits(df_list):
                 found_semester_column = normalized_df_columns[k]
                 break
 
-        # 動態推測欄位的部分略去，保留你的自動判斷
-        # ...
-
-        # 【核心修正點】跨行課名自動合併（允許多次 buffer 疊加）
         buffer_row = None
         for row_idx, row in df.iterrows():
             row_data = {col: normalize_text(row[col]) if pd.notna(row[col]) else "" for col in df.columns}
@@ -108,7 +104,6 @@ def calculate_total_credits(df_list):
             credit_col = row_data.get(found_credit_column, "")
             gpa_col = row_data.get(found_gpa_column, "")
 
-            # 提取學分和GPA
             credit, gpa = parse_credit_and_gpa(credit_col)
             parsed_credit_gpa_col, parsed_gpa_gpa_col = parse_credit_and_gpa(gpa_col)
             if parsed_gpa_gpa_col:
@@ -116,28 +111,22 @@ def calculate_total_credits(df_list):
             if parsed_credit_gpa_col > 0 and credit == 0.0:
                 credit = parsed_credit_gpa_col
 
-            # 判斷當前這一行是不是一筆完整課程資料
             is_complete_row = (
                 credit > 0 or is_passing_gpa(gpa)
                 or normalize_text(credit_col).lower() in ["通過", "抵免", "pass", "exempt"]
                 or normalize_text(gpa_col).lower() in ["通過", "抵免", "pass", "exempt"]
             )
 
-            # 合併多行課名邏輯（buffer 疊加）
             if is_complete_row:
-                # 若之前有 buffer_row，合併科目名稱
                 if buffer_row:
                     subject_full = buffer_row.get("科目名稱", "") + " " + subject_raw
                     subject_full = subject_full.strip()
-                    # 取 buffer 的學年/學期（若有），否則取當前
                     acad_year = buffer_row.get("學年度") or row_data.get(found_year_column, "")
                     semester = buffer_row.get("學期") or row_data.get(found_semester_column, "")
-                    # 只用這一行的學分/GPA
                 else:
                     subject_full = subject_raw
                     acad_year = row_data.get(found_year_column, "")
                     semester = row_data.get(found_semester_column, "")
-                # 存入結果
                 record = {
                     "學年度": acad_year,
                     "學期": semester,
@@ -152,24 +141,20 @@ def calculate_total_credits(df_list):
                     if credit > 0:
                         total_credits += credit
                     calculated_courses.append(record)
-                buffer_row = None  # 清空 buffer
+                buffer_row = None
             else:
-                # 疊加 buffer，直到遇到完整一筆再處理
                 if buffer_row:
-                    # 疊加上去
                     new_subject = buffer_row.get("科目名稱", "") + " " + subject_raw
                     buffer_row["科目名稱"] = new_subject.strip()
-                    # 學年、學期只用 buffer 最早的
                 else:
                     buffer_row = {
                         "科目名稱": subject_raw,
                         "學年度": row_data.get(found_year_column, ""),
                         "學期": row_data.get(found_semester_column, "")
                     }
-        # 處理最後一筆可能剩餘的 buffer_row
         if buffer_row and buffer_row.get("科目名稱"):
             import streamlit as st
             st.warning(f"表格 {df_idx+1} 檢測到未完成的科目名稱：'{buffer_row['科目名稱']}'，由於缺乏學分/GPA，已跳過。")
 
+    print("【DEBUG】即將 return 3 個值")
     return total_credits, calculated_courses, failed_courses
-
