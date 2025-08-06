@@ -48,10 +48,10 @@ def calculate_total_credits(df_list):
     sem_keys     = ["學期","semester"]
 
     for i, df in enumerate(df_list):
-        if df.empty or df.shape[1]<3:
+        if df.empty or df.shape[1] < 3:
             continue
 
-        cols = {re.sub(r"\s+","",c).lower():c for c in df.columns}
+        cols = {re.sub(r"\s+","",c).lower(): c for c in df.columns}
         def pick(keys):
             for k in keys:
                 if k.lower() in cols:
@@ -69,30 +69,28 @@ def calculate_total_credits(df_list):
         buf = ""
         for _, row in df.iterrows():
             rd = {c: normalize_text(row[c]) if pd.notna(row[c]) else "" for c in df.columns}
-            raw = rd.get(scol,"")
-            # 去掉所有开头的非中文
-            subj = re.sub(r"^[^\u4e00-\u9fa5]+","", raw).strip()
-
-            # 跳过无中文或“未知科目”
+            raw = rd.get(scol, "")
+            subj = re.sub(r"^[^\u4e00-\u9fa5]+", "", raw).strip()
+            # 只保留含中文的行
             if not re.search(r"[\u4e00-\u9fa5]", subj):
                 buf = ""
                 continue
 
             ct, gt = 0.0, ""
             if ccol:
-                ct, gt = parse_credit_and_gpa(rd.get(ccol,""))
+                ct, gt = parse_credit_and_gpa(rd.get(ccol, ""))
             if gcol:
-                ct2, gt2 = parse_credit_and_gpa(rd.get(gcol,""))
+                ct2, gt2 = parse_credit_and_gpa(rd.get(gcol, ""))
                 if gt2:
                     gt = gt2
-                if ct2>0 and ct==0:
+                if ct2 > 0 and ct == 0:
                     ct = ct2
 
             complete = (
-                ct>0 
+                ct > 0
                 or is_passing_gpa(gt)
-                or rd.get(ccol,"").lower() in {"通過","抵免"}
-                or rd.get(gcol,"").lower() in {"通過","抵免"}
+                or rd.get(ccol, "").lower() in {"通過","抵免"}
+                or rd.get(gcol, "").lower() in {"通過","抵免"}
             )
 
             if not complete:
@@ -102,8 +100,8 @@ def calculate_total_credits(df_list):
             name = f"{buf} {subj}".strip() if buf else subj
             buf = ""
 
-            year = rd.get(ycol,"")
-            sem  = rd.get(mcol,"")
+            year = rd.get(ycol, "")
+            sem  = rd.get(mcol, "")
             key = (year, sem, name)
             if key in seen:
                 continue
@@ -124,8 +122,8 @@ def calculate_total_credits(df_list):
                 total += ct
                 passed.append(rec)
 
-        # 如果 buf 残留不空，发条 warning
         if buf:
-            st.warning(f"表格{i+1} 残留未合并科目 「{buf}」")
+            import streamlit as st
+            st.warning(f"表格{i+1} 殘留未合并科目「{buf}」")
 
     return total, passed, failed
