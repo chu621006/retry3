@@ -34,21 +34,20 @@ def calculate_total_credits(df_list):
     total_credits = 0.0
     calculated_courses = []
     failed_courses = []
-    seen = set()  # 用来去重： (year, sem, subj)
+    seen = set()  # (學年度, 學期, 科目名稱) 去重
 
-    # 关键字
+    # 關鍵字列表
     credit_keys = ["學分","credit"]
     subject_keys = ["科目名稱","課程名稱","subject"]
     gpa_keys     = ["GPA","成績","grade"]
     year_keys    = ["學年","year"]
     sem_keys     = ["學期","semester"]
 
-    for idx, df in enumerate(df_list):
-        # 跳过空 df
+    for df_idx, df in enumerate(df_list):
         if df.empty or df.shape[1] < 3:
             continue
 
-        # 找列名
+        # 先找出各欄位名
         cols_norm = {re.sub(r"\s+","",c).lower():c for c in df.columns}
         def find_col(keys):
             for k in keys:
@@ -61,71 +60,72 @@ def calculate_total_credits(df_list):
         gpa_col     = find_col(gpa_keys)
         year_col    = find_col(year_keys)
         sem_col     = find_col(sem_keys)
-
         if not subject_col or (not credit_col and not gpa_col):
             continue
 
         buffer_name = ""
         for _, row in df.iterrows():
             rd = {c: normalize_text(row[c]) if pd.notna(row[c]) else "" for c in df.columns}
+
             subj_raw = rd.get(subject_col, "")
+            # 若 subj_raw 前面有「數字+空格」，通通去掉
+            subj_clean = re.sub(r'^\d{3,4}\s*', '', subj_raw).strip()
+
             cred_txt = rd.get(credit_col, "") if credit_col else ""
             gpa_txt  = rd.get(gpa_col, "")    if gpa_col else ""
 
             cred, gpa = parse_credit_and_gpa(cred_txt)
-            pc, pg = parse_credit_and_gpa(gpa_txt)
+            pc, pg   = parse_credit_and_gpa(gpa_txt)
             if pg: gpa = pg
             if pc>0 and cred==0: cred = pc
 
-            # 是否完整课程
-            complete = (
+            # 判斷是否為完整一筆
+            is_complete = (
                 cred>0
                 or is_passing_gpa(gpa)
                 or cred_txt.lower() in {"通過","抵免"}
                 or gpa_txt.lower() in {"通過","抵免"}
             )
 
-            # 空行清空 buffer
+            # 空行清 buffer
             if all(not rd.get(c,"") for c in [subject_col, credit_col, gpa_col] if c):
                 buffer_name = ""
                 continue
 
-            if complete:
-                # 只有本行 cred==0 时合并 buffer
+            if is_complete:
                 if buffer_name and cred==0:
-                    name = f"{buffer_name} {subj_raw}".strip()
+                    final_name = f"{buffer_name} {subj_clean}".strip()
                 else:
-                    name = subj_raw
+                    final_name = subj_clean
                 buffer_name = ""
 
                 acad = rd.get(year_col,"")
                 sem  = rd.get(sem_col,"")
 
-                key = (acad, sem, name)
+                key = (acad, sem, final_name)
                 if key in seen:
                     continue
                 seen.add(key)
 
-                record = {
+                rec = {
                     "學年度": acad,
                     "學期": sem,
-                    "科目名稱": name or "未知科目",
+                    "科目名稱": final_name or "未知科目",
                     "學分": cred,
                     "GPA": gpa,
-                    "來源表格": idx+1
+                    "來源表格": df_idx+1
                 }
                 if gpa and not is_passing_gpa(gpa):
-                    failed_courses.append(record)
+                    failed_courses.append(rec)
                 else:
                     total_credits += cred
-                    calculated_courses.append(record)
+                    calculated_courses.append(rec)
             else:
-                # buffer 只累积文字，不累 credit
-                if subj_raw:
-                    buffer_name = (buffer_name+" "+subj_raw).strip() if buffer_name else subj_raw
+                if subj_clean:
+                    buffer_name = (buffer_name+" "+subj_clean).strip() if buffer_name else subj_clean
 
         if buffer_name:
             import streamlit as st
-            st.warning(f"表格{idx+1} 残留课程「{buffer_name}」")
+            st.warning(f"表格{df_idx+1} 殘留未完成科目「{buffer_name}」")
 
     return total_credits, calculated_courses, failed_courses
