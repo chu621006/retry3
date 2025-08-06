@@ -172,3 +172,4 @@ def calculate_total_credits(df_list):
             st.warning(f"表格 {df_idx+1} 檢測到未完成的科目名稱：'{buffer_row['科目名稱']}'，由於缺乏學分/GPA，已跳過。")
 
     return total_credits, calculated_courses, failed_courses
+
