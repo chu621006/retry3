@@ -15,7 +15,6 @@ def normalize_text(cell_content):
         text = cell_content
     else:
         text = str(cell_content)
-    # collapse all whitespace (incl. newlines) to single space
     return re.sub(r"\s+", " ", text).strip()
 
 def make_unique_columns(columns_list):
@@ -25,10 +24,10 @@ def make_unique_columns(columns_list):
         name = normalize_text(col)
         if not name or len(name) < 2:
             base = "Column"
-            idx = 1
-            while f"{base}_{idx}" in unique:
-                idx += 1
-            name = f"{base}_{idx}"
+            i = 1
+            while f"{base}_{i}" in unique:
+                i += 1
+            name = f"{base}_{i}"
         final = name
         cnt = seen[name]
         while final in unique:
@@ -51,24 +50,15 @@ def is_grades_table(df):
     )
 
 def process_pdf_file(uploaded_file):
-    """
-    1) 先用 extract_tables 把所有识别为成绩表的 DataFrame 收集到 list
-    2) 同时合并全文到 full_text
-    3) 全表格抽取后，再对 full_text 运行 Regex fallback
-       - 如果 Regex 能抓到任何记录，就返回单个 DataFrame（优先）
-       - 否则返回表格抽取得到的 list of DataFrame
-    """
     table_dfs = []
     full_text = ""
 
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page_idx, page in enumerate(pdf.pages):
-                # 1) 累积全文
                 txt = page.extract_text() or ""
                 full_text += normalize_text(txt) + "\n"
 
-                # 2) 表格抽取
                 settings = {
                     "vertical_strategy": "lines",
                     "horizontal_strategy": "lines",
@@ -108,10 +98,14 @@ def process_pdf_file(uploaded_file):
                         if is_grades_table(df):
                             table_dfs.append(df)
                             st.success(f"頁面 {page_idx+1} 表格 {tbl_idx+1} 已處理")
-                    except Exception:
+                    except:
                         continue
 
-        # 3) Regex fallback：只要能匹配到完整记录，就用它的结果覆盖表格抽取
+        # 【关键修正】如果有任何表格被正常抽取，直接返回它们
+        if table_dfs:
+            return table_dfs
+
+        # 否则才启用一次性全文 Regex fallback
         pattern = re.compile(
             r"(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)",
             re.UNICODE
@@ -120,18 +114,24 @@ def process_pdf_file(uploaded_file):
         if matches:
             all_rows = []
             for year, sem, subj, cred, gpa in matches:
-                # subj 已经是 normalize_text 后的单行
-                all_rows.append([year, sem, normalize_text(subj), cred, gpa])
+                all_rows.append([
+                    year,
+                    sem,
+                    normalize_text(subj),
+                    cred,
+                    gpa
+                ])
             regex_df = pd.DataFrame(
-                all_rows, columns=["學年度", "學期", "科目名稱", "學分", "GPA"]
+                all_rows,
+                columns=["學年度", "學期", "科目名稱", "學分", "GPA"]
             )
-            st.success("Regex fallback 已處理整份 PDF，优先返回此部分结果。")
+            st.success("Regex fallback 已處理整份 PDF，优先返回此结果。")
             return [regex_df]
 
     except pdfplumber.PDFSyntaxError as e:
-        st.error(f"PDF 语法错误: {e}")
+        st.error(f"PDF 語法錯誤: {e}")
     except Exception as e:
-        st.error(f"处理 PDF 时发生错误: {e}")
+        st.error(f"處理 PDF 時發生錯誤: {e}")
 
-    # 若 Regex 没匹配到任何记录，就回归表格抽取结果
-    return table_dfs
+    # 最后回傳空列表（无表格也无 regex 匹配）
+    return []
