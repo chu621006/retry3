@@ -94,8 +94,8 @@ def process_pdf_file(uploaded_file):
                     except:
                         continue
 
-        # 若表格内容过少，则一次性 Regex fallback
-        if not table_dfs or sum(len(df) for df in table_dfs) < 5:
+        # 只在**完全没有**抽到任何表格时，才用 Regex fallback
+        if not table_dfs:
             pattern = re.compile(
                 r"(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)",
                 re.UNICODE
