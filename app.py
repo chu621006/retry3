@@ -1,8 +1,12 @@
-# app.py
 import streamlit as st
 import pandas as pd
+import sys
 from utils.pdf_processing import process_pdf_file
 from utils.grade_analysis import calculate_total_credits
+import utils.grade_analysis
+
+print("【DEBUG】sys.path:", sys.path)
+print("【DEBUG】utils.grade_analysis module path:", utils.grade_analysis.__file__)
 
 def main():
     st.set_page_config(page_title="PDF 成績單學分計算工具", layout="wide")
@@ -20,8 +24,9 @@ def main():
 
         if extracted_dfs:
             try:
-                # 這裡只允許解包三個值，若有錯會顯示 error
+                print("【DEBUG】呼叫 calculate_total_credits 前")
                 total_credits, calculated_courses, failed_courses = calculate_total_credits(extracted_dfs)
+                print("【DEBUG】呼叫 calculate_total_credits 後")
             except Exception as e:
                 st.error(f"學分計算階段出現錯誤: {e}")
                 st.stop()
