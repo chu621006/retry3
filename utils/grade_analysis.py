@@ -196,130 +196,62 @@ def calculate_total_credits(df_list):
         if not found_gpa_column: found_gpa_column = get_best_col(potential_gpa_cols, credit_idx)
 
 
-        # Main parsing loop for rows
+        # Main parsing loop for rows (Simplified for anti-pollution)
         if found_credit_column and found_subject_column: # Essential columns must be found to proceed
             try:
-                temp_subject_name_buffer = "" # Buffer to collect multi-line subject names
-
                 for row_idx, row in df.iterrows():
                     row_data = {col: normalize_text(row[col]) if pd.notna(row[col]) else "" for col in df.columns}
 
-                    current_row_subject_name_raw = row_data.get(found_subject_column, "")
+                    current_row_subject_name = row_data.get(found_subject_column, "")
                     credit_col_content = row_data.get(found_credit_column, "")
                     gpa_col_content = row_data.get(found_gpa_column, "")
                     
-                    year_col_content = row_data.get(found_year_column, "") # Get year content
-                    semester_col_content = row_data.get(found_semester_column, "") # Get semester content
-                    course_code_col_content = row_data.get(found_course_code_column, "") # Get course code content
-
-
                     # Extract credit and GPA from their respective columns
-                    extracted_credit_this_row, extracted_gpa_this_row = parse_credit_and_gpa(credit_col_content)
+                    extracted_credit, extracted_gpa = parse_credit_and_gpa(credit_col_content)
                     _, gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content) 
-                    if gpa_from_gpa_col: extracted_gpa_this_row = gpa_from_gpa_col.upper()
-                    
-                    # Define if this row contains enough info to be considered a complete course entry
-                    has_complete_course_info_this_row = (
-                        extracted_credit_this_row > 0 or 
-                        is_passing_gpa(extracted_gpa_this_row) or 
-                        normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"] or 
-                        normalize_text(gpa_col_content).lower() in ["通過", "抵免", "pass", "exempt"]
-                    )
-                    
-                    # Define if the text in the subject column looks like a valid part of a subject name
-                    is_valid_subject_fragment_text = (
-                        current_row_subject_name_raw and len(current_row_subject_name_raw) >= 2 and
-                        re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw) and 
-                        not (current_row_subject_name_raw.isdigit() and len(current_row_subject_name_raw) in [3,4]) and 
-                        not re.match(r'^\w{3,5}$', current_row_subject_name_raw) and
-                        not (len(current_row_subject_name_raw) <=3 and not re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw)) # Avoid very short non-Chinese fragments
+                    if gpa_from_gpa_col: extracted_gpa = gpa_from_gpa_col.upper()
+
+                    # Define if the text in the subject column looks like a valid subject name (not just a fragment that would be concatenated)
+                    is_valid_full_subject_text = (
+                        current_row_subject_name and len(current_row_subject_name) >= 2 and
+                        re.search(r'[\u4e00-\u9fa5]', current_row_subject_name) and 
+                        not (current_row_subject_name.isdigit() and len(current_row_subject_name) in [3,4]) and 
+                        not re.match(r'^\w{3,5}$', current_row_subject_name) and
+                        not (len(current_row_subject_name) <=3 and not re.search(r'[\u4e00-\u9fa5]', current_row_subject_name)) 
                     )
 
-                    # Define if this row contains a strong signal for a new course block start.
-                    # This signal should be very reliable for marking new sections.
-                    is_strong_new_block_signal = (
-                        (found_year_column and year_col_content and re.match(r'^\d{3,4}$', year_col_content)) or # Academic year number in its column
-                        (found_semester_column and semester_col_content and re.search(r'(上|下|春|夏|秋|冬|1|2|3)', semester_col_content)) or # Semester keyword in its column
-                        (found_course_code_column and course_code_col_content and re.match(r'^\w{3,5}$', course_code_col_content)) # Course code pattern in its column
+                    # Determine if this row represents a complete course entry for calculation/listing
+                    is_complete_course_entry = (
+                        is_valid_full_subject_text and 
+                        (0.0 < extracted_credit <= 5.0 or 
+                         is_passing_gpa(extracted_gpa) or
+                         normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"] or 
+                         normalize_text(gpa_col_content).lower() in ["通過", "抵免", "pass", "exempt"])
                     )
 
-
-                    # --- State machine logic (prioritizing anti-pollution) ---
-
-                    if is_strong_new_block_signal:
-                        # Case 1: Strong signal for a new course block. FORCE clear buffer.
-                        # This implies any previous multi-line course (if not finalized) is now ended.
-                        if temp_subject_name_buffer:
-                            temp_subject_name_buffer = ""
-                        
-                        # If this new block start also contains subject text, start buffering it.
-                        # This handles cases where the new year row *is* also the first part of a multi-line subject.
-                        if is_valid_subject_fragment_text:
-                            temp_subject_name_buffer = current_row_subject_name_raw
-                        
-                        # If this row also happens to have complete course info, process it now.
-                        # This covers cases where the first row of a new year also contains complete course details.
-                        if has_complete_course_info_this_row:
-                            # Use current_row_subject_name_raw as this is a new, complete course record.
-                            # We deliberately do not use temp_subject_name_buffer here to prevent pollution
-                            # if the buffer still contained part of a *previous* multi-line course that ended here.
-                            final_subject_name = current_row_subject_name_raw 
-                            
-                            acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
-                            course_info = {
-                                "學年度": acad_year, "學期": semester, "科目名稱": final_subject_name, 
-                                "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
-                            }
-                            if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
-                            else:
-                                if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
-                                calculated_courses.append(course_info)
-                            temp_subject_name_buffer = "" # Clear again after processing a course
-
-                    elif has_complete_course_info_this_row:
-                        # Case 2: This row has full course info (and no strong new block signal was found for this row).
-                        # This implies a new complete course is on this line, or it's the *completing* line of a multi-line course.
-                        
-                        # IMPORTANT: If there's anything in the buffer from a *previous, incomplete* multi-line subject,
-                        # it means that previous subject never finalized, AND a new complete course is appearing.
-                        # To prevent pollution of the *current* complete course with the *previous* incomplete one,
-                        # we must clear the buffer. This is the key change for anti-pollution.
-                        if temp_subject_name_buffer:
-                            temp_subject_name_buffer = "" # **關鍵修改：如果存在舊的緩衝內容，強制清空以防止污染**
-
-                        final_subject_name = current_row_subject_name_raw # Use current row's name directly as this is a new, self-contained course.
-                        # 由於上一步已經清空了緩衝區，這裡不再拼接 temp_subject_name_buffer。
-                        # 這意味著，如果一個多行課程，只有在最後一行有學分/GPA，那麼前幾行的名稱會被「截斷」。
-                        # 這是為了優先解決污染問題而做的權衡。
-                        
+                    if is_complete_course_entry:
                         acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
+                        
                         course_info = {
-                            "學年度": acad_year, "學期": semester, "科目名稱": final_subject_name, 
-                            "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
+                            "學年度": acad_year, 
+                            "學期": semester, 
+                            "科目名稱": current_row_subject_name, 
+                            "學分": extracted_credit, 
+                            "GPA": extracted_gpa, 
+                            "來源表格": df_idx + 1
                         }
 
-                        if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
+                        if extracted_gpa and not is_passing_gpa(extracted_gpa):
+                            failed_courses.append(course_info)
                         else:
-                            if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
-                            calculated_courses.append(course_info)
-                        
-                        temp_subject_name_buffer = "" # CRITICAL: Clear buffer immediately after finalizing a course.
+                            # Only add to total_credits if it's a passing course and credit is within the 0-5 range.
+                            if 0.0 < extracted_credit <= 5.0:
+                                total_credits += extracted_credit
+                                calculated_courses.append(course_info)
+                            # If credit is not in range but is passing (e.g., >5, or "通過" with 0 credit), still add to calculated_courses for display
+                            elif is_passing_gpa(extracted_gpa) or normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"]:
+                                calculated_courses.append(course_info)
 
-                    elif is_valid_subject_fragment_text:
-                        # Case 3: This row is a valid subject fragment (but not a full course, nor a strong new block signal).
-                        # Append it to the current buffer. This is for legitimate multi-line subjects.
-                        temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
-                        
-                    else:
-                        # Case 4: Irrelevant row (not a complete course, not a strong new block, not a valid fragment).
-                        # Clear buffer to prevent any accumulated noise.
-                        if temp_subject_name_buffer:
-                            temp_subject_name_buffer = "" 
-                        
-                # After iterating through all rows in a DataFrame, check if there's any lingering subject fragment
-                if temp_subject_name_buffer:
-                    # Log or discard incomplete buffered subject at the end of a table.
-                    pass 
 
             except Exception as e:
                 import streamlit as st 
