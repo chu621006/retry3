@@ -1,14 +1,15 @@
 # utils/pdf_processing.py
+
 import streamlit as st
 import pandas as pd
 import pdfplumber
 import collections
 import re
+from .grade_analysis import parse_credit_and_gpa  # 用到 normalize_text、parse_credit_and_gpa
 
 def normalize_text(cell_content):
     if cell_content is None:
         return ""
-    text = ""
     if hasattr(cell_content, 'text'):
         text = str(cell_content.text)
     elif isinstance(cell_content, str):
@@ -21,49 +22,49 @@ def make_unique_columns(columns_list):
     seen = collections.defaultdict(int)
     unique_columns = []
     for col in columns_list:
-        original_col_cleaned = normalize_text(col)
-        if not original_col_cleaned or len(original_col_cleaned) < 2:
-            name_base = "Column"
-            current_idx = 1
-            while f"{name_base}_{current_idx}" in unique_columns:
-                current_idx += 1
-            name = f"{name_base}_{current_idx}"
+        original = normalize_text(col)
+        if not original or len(original) < 2:
+            base = "Column"
+            idx = 1
+            while f"{base}_{idx}" in unique_columns:
+                idx += 1
+            name = f"{base}_{idx}"
         else:
-            name = original_col_cleaned
-        final_name = name
-        counter = seen[name]
-        while final_name in unique_columns:
-            counter += 1
-            final_name = f"{name}_{counter}"
-        unique_columns.append(final_name)
-        seen[name] = counter
+            name = original
+        final = name
+        cnt = seen[name]
+        while final in unique_columns:
+            cnt += 1
+            final = f"{name}_{cnt}"
+        unique_columns.append(final)
+        seen[name] = cnt
     return unique_columns
 
 def is_grades_table(df):
+    # (保持你原本的判斷邏輯)
     if df.empty or len(df.columns) < 3:
         return False
-    normalized_columns = [re.sub(r'\s+', '', col).lower() for col in df.columns.tolist()]
-    credit_keywords = ["學分", "credits", "credit", "學分數"]
-    gpa_keywords = ["gpa", "成績", "grade", "gpa(數值)"]
-    subject_keywords = ["科目名稱", "課程名稱", "coursename", "subjectname", "科目", "課程"]
-    year_keywords = ["學年", "year"]
-    semester_keywords = ["學期", "semester"]
-    has_credit_col_header = any(any(k in col for k in credit_keywords) for col in normalized_columns)
-    has_gpa_col_header = any(any(k in col for k in gpa_keywords) for col in normalized_columns)
-    has_subject_col_header = any(any(k in col for k in subject_keywords) for col in normalized_columns)
-    has_year_col_header = any(any(k in col for k in year_keywords) for col in normalized_columns)
-    has_semester_col_header = any(any(k in col for k in semester_keywords) for col in normalized_columns)
-    if has_subject_col_header and (has_credit_col_header or has_gpa_col_header) and has_year_col_header and has_semester_col_header:
-        return True
-    # ...下方內容維持原本
-    # 保持你原本的動態推測即可
+    normalized_columns = [re.sub(r'\s+', '', c).lower() for c in df.columns]
+    credit_kw = ["學分", "credit"]
+    gpa_kw    = ["gpa", "成績", "grade"]
+    subject_kw= ["科目名稱", "課程名稱", "subject", "course"]
+    year_kw   = ["學年", "year"]
+    sem_kw    = ["學期", "semester"]
+
+    has_credit = any(any(k in c for k in credit_kw) for c in normalized_columns)
+    has_gpa    = any(any(k in c for k in gpa_kw)    for c in normalized_columns)
+    has_subj   = any(any(k in c for k in subject_kw)for c in normalized_columns)
+    has_year   = any(any(k in c for k in year_kw)   for c in normalized_columns)
+    has_sem    = any(any(k in c for k in sem_kw)    for c in normalized_columns)
+
+    return has_subj and (has_credit or has_gpa) and has_year and has_sem
 
 def process_pdf_file(uploaded_file):
     all_grades_data = []
+
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page_num, page in enumerate(pdf.pages):
-                current_page = page
                 table_settings = {
                     "vertical_strategy": "lines",
                     "horizontal_strategy": "lines",
@@ -74,61 +75,63 @@ def process_pdf_file(uploaded_file):
                     "min_words_vertical": 1,
                     "min_words_horizontal": 1,
                 }
-                try:
-                    tables = current_page.extract_tables(table_settings)
-                    if not tables:
-                        # 新增：「若無表格」則用全頁純文字，試著補抓第一筆
-                        raw_text = current_page.extract_text()
-                        if raw_text:
-                            lines = [normalize_text(line) for line in raw_text.splitlines() if line.strip()]
-                            # 檢查行內是否有「學分」數字、「GPA」或「成績」關鍵字
-                            # 這裡建議只做簡單收集，詳細判斷交給後續分析
-                            st.info(f"頁面 {page_num+1} 未偵測到表格，僅抓取全頁文字供備用。")
-                        continue
-                    for table_idx, table in enumerate(tables):
-                        processed_table = []
+
+                # 嘗試用 extract_tables
+                tables = page.extract_tables(table_settings)
+                if tables:
+                    for tidx, table in enumerate(tables):
+                        # 清洗 table
+                        rows = []
                         for row in table:
-                            normalized_row = [normalize_text(cell) for cell in row]
-                            if any(cell.strip() != "" for cell in normalized_row):
-                                processed_table.append(normalized_row)
-                        if not processed_table:
-                            st.info(f"頁面 {page_num+1} 的表格 {table_idx+1} 提取後為空。")
+                            norm = [normalize_text(c) for c in row]
+                            if any(cell for cell in norm):
+                                rows.append(norm)
+                        if not rows or len(rows[0]) < 3:
                             continue
-                        # 【修正點】如果第一行被誤判為標題，但其實就是課程資料，也一併納入資料行
-                        header_row = processed_table[0]
-                        data_rows = processed_table[1:] if len(processed_table) > 1 else []
-                        # 若 data_rows 全部不含關鍵字，而 header_row 明顯是資料，也補進去
-                        keywords = ["學分", "GPA", "成績", "分", "grade"]
-                        if not any(any(k in h for k in keywords) for h in header_row):
-                            # header 不是標題，直接當資料行
-                            data_rows = [header_row] + data_rows
-                            header_row = [f"Column_{i+1}" for i in range(len(header_row))]
-                        unique_columns = make_unique_columns(header_row)
-                        if data_rows:
-                            num_columns_header = len(unique_columns)
-                            cleaned_data_rows = []
-                            for row in data_rows:
-                                if len(row) > num_columns_header:
-                                    cleaned_data_rows.append(row[:num_columns_header])
-                                elif len(row) < num_columns_header:
-                                    cleaned_data_rows.append(row + [''] * (num_columns_header - len(row)))
-                                else:
-                                    cleaned_data_rows.append(row)
-                            try:
-                                df_table = pd.DataFrame(cleaned_data_rows, columns=unique_columns)
-                                if is_grades_table(df_table):
-                                    all_grades_data.append(df_table)
-                                    st.success(f"頁面 {page_num+1} 的表格 {table_idx+1} 已識別為成績單表格並已處理。")
-                                else:
-                                    st.info(f"頁面 {page_num+1} 的表格 {table_idx+1} (表頭: {header_row}) 未識別為成績單表格，已跳過。")
-                            except Exception as e_df:
-                                st.error(f"頁面 {page_num+1} 表格 {table_idx+1} 轉換 DataFrame 錯誤: `{e_df}`")
-                        else:
-                            st.info(f"頁面 {page_num+1} 的表格 {table_idx+1} 沒有數據行。")
-                except Exception as e_table:
-                    st.error(f"頁面 {page_num+1} 處理表格時發生錯誤: `{e_table}`")
-    except pdfplumber.PDFSyntaxError as e_pdf_syntax:
-        st.error(f"處理 PDF 語法時發生錯誤: `{e_pdf_syntax}`")
+                        header, data_rows = rows[0], rows[1:]
+                        cols = make_unique_columns(header)
+                        cleaned = []
+                        for r in data_rows:
+                            if len(r) > len(cols):
+                                cleaned.append(r[:len(cols)])
+                            elif len(r) < len(cols):
+                                cleaned.append(r + [""] * (len(cols) - len(r)))
+                            else:
+                                cleaned.append(r)
+                        try:
+                            df = pd.DataFrame(cleaned, columns=cols)
+                            if is_grades_table(df):
+                                all_grades_data.append(df)
+                                st.success(f"頁面 {page_num+1} 的表格 {tidx+1} 已識別並處理。")
+                        except Exception:
+                            continue
+                else:
+                    # fallback: 純文字解析學年度/學期/科目/學分/GPA
+                    text = page.extract_text()
+                    if text and "學年度" in text and "GPA" in text:
+                        # 逐行分割
+                        lines = [normalize_text(l) for l in text.splitlines() if normalize_text(l)]
+                        # 找到 header 行
+                        for idx, line in enumerate(lines):
+                            if re.search(r'學年度.*學分.*GPA', line):
+                                hdr = re.split(r'\s{2,}', line)
+                                data = []
+                                for row in lines[idx+1:]:
+                                    # 一般 data 行會以學年度開頭 (3或4位數)
+                                    if not re.match(r'^\d{3,4}\s', row):
+                                        break
+                                    parts = re.split(r'\s{2,}', row)
+                                    if len(parts) >= len(hdr):
+                                        data.append(parts[:len(hdr)])
+                                if data:
+                                    cols = make_unique_columns(hdr)
+                                    df = pd.DataFrame(data, columns=cols)
+                                    all_grades_data.append(df)
+                                    st.success(f"頁面 {page_num+1} 純文字解析已處理。")
+                                break
+    except pdfplumber.PDFSyntaxError as e:
+        st.error(f"PDF 語法錯誤: {e}")
     except Exception as e:
-        st.error(f"處理 PDF 檔案時發生錯誤: `{e}`")
+        st.error(f"處理 PDF 時發生錯誤: {e}")
+
     return all_grades_data
