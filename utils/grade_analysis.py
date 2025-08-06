@@ -1,15 +1,11 @@
 # utils/grade_analysis.py
 import pandas as pd
 import re
-from .pdf_processing import normalize_text # 從同層目錄的 pdf_processing.py 導入
+from .pdf_processing import normalize_text 
 
 def is_passing_gpa(gpa_str):
-    """
-    判斷給定的 GPA 字串是否為通過成績。
-    """
     gpa_clean = normalize_text(gpa_str).upper()
     failing_grades = ["D", "D-", "E", "F", "X", "不通過", "未通過", "不及格"] 
-    
     if not gpa_clean: return False
     if gpa_clean in ["通過", "抵免", "PASS", "EXEMPT"]: return True
     if gpa_clean in failing_grades: return False
@@ -17,56 +13,38 @@ def is_passing_gpa(gpa_str):
     if gpa_clean.replace('.', '', 1).isdigit():
         try: return float(gpa_clean) >= 60.0 
         except ValueError: pass
-            
     return False
 
 def parse_credit_and_gpa(text):
-    """
-    從單元格文本中解析學分和 GPA。
-    返回 (學分, GPA)。如果解析失敗，返回 (0.0, "")。
-    """
     text_clean = normalize_text(text)
-    
     if text_clean.lower() in ["通過", "抵免", "pass", "exempt"]: return 0.0, text_clean
-
     match_gpa_credit = re.match(r'([A-Fa-f][+\-]?)\s*(\d+(\.\d+)?)', text_clean)
     if match_gpa_credit:
-        gpa = match_gpa_credit.group(1).upper()
-        try: return float(match_gpa_credit.group(2)), gpa
+        try: return float(match_gpa_credit.group(2)), match_gpa_credit.group(1).upper()
         except ValueError: pass
-
     match_credit_gpa = re.match(r'(\d+(\.\d+)?)\s*([A-Fa-f][+\-]?)', text_clean)
     if match_credit_gpa:
         try: return float(match_credit_gpa.group(1)), match_credit_gpa.group(3).upper()
         except ValueError: pass
-            
     credit_only_match = re.search(r'(\d+(\.\d+)?)', text_clean)
     if credit_only_match:
         try: return float(credit_only_match.group(1)), "" 
         except ValueError: pass
-
-    gpa_only_match = re.search(r'([A-Fa-f][+\-]?)', text_only_match)
+    gpa_only_match = re.search(r'([A-Fa-f][+\-]?)', text_clean)
     if gpa_only_match: return 0.0, gpa_only_match.group(1).upper()
-
     return 0.0, ""
 
 def extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df_columns):
-    """Helper to extract year and semester from row data, with fallback logic."""
     acad_year = row_data.get(found_year_column, "")
     semester = row_data.get(found_semester_column, "")
-
-    # Fallback for year if not directly in its column
     if not acad_year and found_course_code_column and found_course_code_column in row_data:
         match = re.search(r'^(\d{3,4})', row_data[found_course_code_column])
         if match: acad_year = match.group(1)
-
     if not acad_year and found_subject_column and found_subject_column in row_data:
         match = re.search(r'^(\d{3,4})\s*(上|下|春|夏|秋|冬|1|2|3)?', row_data[found_subject_column])
         if match:
             acad_year = match.group(1)
             if match.group(2) and not semester: semester = match.group(2)
-
-    # General fallback to first/second column if year/semester still not found
     if not acad_year and len(df_columns) > 0 and df_columns[0] in row_data:
         temp_first_col = row_data[df_columns[0]]
         year_match = re.search(r'(\d{3,4})', temp_first_col)
@@ -74,21 +52,14 @@ def extract_year_semester(row_data, found_year_column, found_semester_column, fo
         if not semester:
             sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_first_col, re.IGNORECASE)
             if sem_match: semester = sem_match.group(1)
-
     if not semester and len(df_columns) > 1 and df_columns[1] in row_data:
         temp_second_col = row_data[df_columns[1]]
         sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_second_col, re.IGNORECASE)
         if sem_match: semester = sem_match.group(1)
-    
     return acad_year, semester
 
 
 def calculate_total_credits(df_list):
-    """
-    從提取的 DataFrames 列表中計算總學分。
-    尋找包含 '學分' 或 '學分(GPA)' 類似字樣的欄位進行加總。
-    返回總學分和計算學分的科目列表，以及不及格科目列表。
-    """
     total_credits = 0.0
     calculated_courses = [] 
     failed_courses = [] 
@@ -202,7 +173,7 @@ def calculate_total_credits(df_list):
                     course_code_col_content = row_data.get(found_course_code_column, "") 
 
                     extracted_credit_this_row, extracted_gpa_this_row = parse_credit_and_gpa(credit_col_content)
-                    _, gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content) # Get GPA from GPA column if available
+                    _, gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content) 
                     if gpa_from_gpa_col: extracted_gpa_this_row = gpa_from_gpa_col.upper()
                     
                     has_complete_course_info_this_row = (
@@ -225,34 +196,9 @@ def calculate_total_credits(df_list):
                         not re.match(r'^\w{3,5}$', current_row_subject_name_raw) 
                     )
 
-                    # Main State Machine Logic
-                    if is_strong_new_course_signal:
-                        # Case 1: Start of a new course identified. Discard any old buffer.
-                        if temp_subject_name_buffer:
-                            # st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱片段: '{temp_subject_name_buffer}'，被新課程開頭中斷，已跳過。")
-                            pass
-                        temp_subject_name_buffer = ""
-
-                        if has_complete_course_info_this_row and is_valid_subject_fragment_text:
-                            # New course, complete on one line.
-                            acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
-                            course_info = {
-                                "學年度": acad_year, "學期": semester, "科目名稱": current_row_subject_name_raw, 
-                                "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
-                            }
-                            if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
-                            else:
-                                if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
-                                calculated_courses.append(course_info)
-                        elif is_valid_subject_fragment_text:
-                            # New course, starting multi-line subject.
-                            temp_subject_name_buffer = current_row_subject_name_raw
-                        # If it's a strong signal but no valid subject text, then it's likely a header/summary line,
-                        # the buffer is already cleared, so nothing more to do for this row.
-
-                    elif has_complete_course_info_this_row:
-                        # Case 2: Current row completes a course (has credit/GPA), not a new course signal.
-                        # This must be the final part of a multi-line subject or a single-line course.
+                    # State machine logic
+                    if has_complete_course_info_this_row:
+                        # Case 1: This row completes a course. Finalize subject name.
                         final_subject_name = current_row_subject_name_raw
                         if temp_subject_name_buffer:
                             final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
@@ -270,16 +216,21 @@ def calculate_total_credits(df_list):
                         
                         temp_subject_name_buffer = "" # Clear buffer after a course is finalized.
 
+                    elif is_strong_new_course_signal: # 新課程訊號，並且不是完成當前課程的行
+                        if temp_subject_name_buffer: # 如果有緩衝區，說明之前的科目沒完成，清空它
+                            temp_subject_name_buffer = "" 
+                        
+                        if is_valid_subject_fragment_text: # 如果當前行的科目名稱有效，作為新課程的第一部分
+                             temp_subject_name_buffer = current_row_subject_name_raw
+
                     elif is_valid_subject_fragment_text:
                         # Case 3: Current row is a subject fragment. Append to buffer.
                         temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
                         
                     else:
-                        # Case 4: Irrelevant row. Clear buffer.
+                        # Case 4: Irrelevant row. Clear buffer if any.
                         if temp_subject_name_buffer:
-                            # st.warning(f"表格 {df_idx + 1} 偵測到未完成的科目名稱片段: '{temp_subject_name_buffer}'，被非課程行中斷，已跳過。")
-                            pass
-                        temp_subject_name_buffer = "" 
+                            temp_subject_name_buffer = "" 
                         
                 if temp_subject_name_buffer:
                     # st.warning(f"表格 {df_idx + 1} 偵測到文件末尾未完成的科目名稱片段: '{temp_subject_name_buffer}'，已跳過。")
