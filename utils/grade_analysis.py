@@ -37,21 +37,28 @@ def parse_credit_and_gpa(text):
 def extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df_columns):
     acad_year = row_data.get(found_year_column, "")
     semester = row_data.get(found_semester_column, "")
+    # Try to extract year from course code if year column is empty
     if not acad_year and found_course_code_column and found_course_code_column in row_data:
+        # Look for 3 or 4 digits at the beginning of the course code
         match = re.search(r'^(\d{3,4})', row_data[found_course_code_column])
         if match: acad_year = match.group(1)
+    # Try to extract year/semester from subject name if other columns are empty
     if not acad_year and found_subject_column and found_subject_column in row_data:
+        # Look for 3 or 4 digits potentially followed by semester keywords
         match = re.search(r'^(\d{3,4})\s*(上|下|春|夏|秋|冬|1|2|3)?', row_data[found_subject_column])
         if match:
             acad_year = match.group(1)
             if match.group(2) and not semester: semester = match.group(2)
+    # Try to extract year from the very first column if year column is empty and it looks like a year
     if not acad_year and len(df_columns) > 0 and df_columns[0] in row_data:
         temp_first_col = row_data[df_columns[0]]
         year_match = re.search(r'(\d{3,4})', temp_first_col)
-        if year_match: acad_year = temp_first_col
-        if not semester:
+        if year_match and len(temp_first_col) <= 5: # Limit length to avoid picking up random numbers
+            acad_year = temp_first_col
+        if not semester: # Also try to get semester from the first column if not found
             sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_first_col, re.IGNORECASE)
             if sem_match: semester = sem_match.group(1)
+    # Try to extract semester from the second column if semester column is empty
     if not semester and len(df_columns) > 1 and df_columns[1] in row_data:
         temp_second_col = row_data[df_columns[1]]
         sem_match = re.search(r'(上|下|春|夏|秋|冬|1|2|3|春季|夏季|秋季|冬季|spring|summer|fall|winter)', temp_second_col, re.IGNORECASE)
@@ -109,6 +116,7 @@ def calculate_total_credits(df_list):
 
             subject_vals_found = 0
             for item_str in sample_data:
+                # Subject should contain Chinese characters, be reasonably long, and not look like other column types
                 if re.search(r'[\u4e00-\u9fa5]', item_str) and len(item_str) >= 2 and \
                    not item_str.isdigit() and not re.match(r'^[A-Fa-f][+\-]?$', item_str) and \
                    not item_str.lower() in ["通過", "抵免", "pass", "exempt"] and \
@@ -118,33 +126,41 @@ def calculate_total_credits(df_list):
 
             gpa_vals_found = 0
             for item_str in sample_data:
+                # GPA can be a grade letter, a number, or a pass/exempt keyword
                 if re.match(r'^[A-Fa-f][+\-]?$', item_str) or (item_str.replace('.', '', 1).isdigit() and len(item_str) <=5) or item_str.lower() in ["通過", "抵免", "pass", "exempt"]: 
                     gpa_vals_found += 1
             if gpa_vals_found / total_sample_count >= 0.4: potential_gpa_cols.append(col_name)
 
             year_vals_found = 0
             for item_str in sample_data:
+                # Year is typically 3 or 4 digits
                 if (item_str.isdigit() and (len(item_str) == 3 or len(item_str) == 4)): year_vals_found += 1
             if year_vals_found / total_sample_count >= 0.6: potential_year_cols.append(col_name)
 
             semester_vals_found = 0
             for item_str in sample_data:
+                # Semester keywords
                 if item_str.lower() in ["上", "下", "春", "夏", "秋", "冬", "1", "2", "3", "春季", "夏季", "秋季", "冬季", "spring", "summer", "fall", "winter"]: semester_vals_found += 1
             if semester_vals_found / total_sample_count >= 0.6: potential_semester_cols.append(col_name)
             
             course_code_vals_found = 0
             for item_str in sample_data:
+                # Course code usually alphanumeric, 3-5 chars, not just digits that look like year
                 if re.match(r'^\w{3,5}$', item_str) and not (item_str.isdigit() and len(item_str) in [3,4]): 
                     course_code_vals_found += 1
             if course_code_vals_found / total_sample_count >= 0.4: potential_course_code_cols.append(col_name)
 
+        # Helper to get the "best" column from potentials, preferring columns after a reference index
         def get_best_col(potentials, reference_col_idx=None, df_cols=df.columns):
             if not potentials: return None
-            if reference_col_idx is None: return sorted(potentials, key=lambda x: df_cols.get_loc(x))[0]
-            after_ref_candidates = [col for col in potentials if df_cols.get_loc(col) > reference_col_idx]
-            if after_ref_candidates: return sorted(after_ref_candidates, key=lambda x: df_cols.get_loc(x))[0]
+            # If a reference column is provided, prefer columns that appear AFTER it
+            if reference_col_idx is not None:
+                after_ref_candidates = [col for col in potentials if df_cols.get_loc(col) > reference_col_idx]
+                if after_ref_candidates: return sorted(after_ref_candidates, key=lambda x: df_cols.get_loc(x))[0]
+            # Otherwise, just pick the one that appears earliest in the DataFrame
             return sorted(potentials, key=lambda x: df_cols.get_loc(x))[0]
 
+        # Assign columns based on confidence and order
         if not found_year_column: found_year_column = get_best_col(potential_year_cols)
         year_idx = df.columns.get_loc(found_year_column) if found_year_column else -1
         if not found_semester_column: found_semester_column = get_best_col(potential_semester_cols, year_idx)
@@ -158,7 +174,8 @@ def calculate_total_credits(df_list):
         if not found_gpa_column: found_gpa_column = get_best_col(potential_gpa_cols, credit_idx)
 
 
-        if found_credit_column and found_subject_column: 
+        # Main parsing loop
+        if found_credit_column and found_subject_column: # Essential columns must be found
             try:
                 temp_subject_name_buffer = "" 
 
@@ -172,43 +189,52 @@ def calculate_total_credits(df_list):
                     semester_col_content = row_data.get(found_semester_column, "") 
                     course_code_col_content = row_data.get(found_course_code_column, "") 
 
+                    # Extract credit and GPA from their respective columns
                     extracted_credit_this_row, extracted_gpa_this_row = parse_credit_and_gpa(credit_col_content)
                     _, gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content) 
                     if gpa_from_gpa_col: extracted_gpa_this_row = gpa_from_gpa_col.upper()
                     
+                    # Does this row contain enough info to be a complete course entry?
                     has_complete_course_info_this_row = (
                         extracted_credit_this_row > 0 or 
-                        is_passing_gpa(extracted_gpa_this_row) or 
-                        normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"] or 
+                        is_passing_gpa(extracted_gpa_this_row) or # Also consider GPA itself as a completion signal
+                        normalize_text(credit_col_content).lower() in ["通過", "抵免", "pass", "exempt"] or # Keywords as completion
                         normalize_text(gpa_col_content).lower() in ["通過", "抵免", "pass", "exempt"]
                     )
                     
+                    # Does this row contain strong signals for a *new* course starting?
+                    # This is now used to *clear* buffer if the *current row itself* doesn't seem to be a fragment.
                     is_strong_new_course_signal = (
                         (year_col_content and year_col_content.isdigit() and len(year_col_content) in [3,4]) or 
                         (semester_col_content and re.search(r'(上|下|春|夏|秋|冬|1|2|3)', semester_col_content)) or
                         (course_code_col_content and re.match(r'^\w{3,5}$', course_code_col_content)) 
                     )
 
+                    # Is the text in the subject column a valid-looking part of a subject name?
+                    # It should contain Chinese characters, be reasonably long, and not purely numeric/alphanumeric code.
                     is_valid_subject_fragment_text = (
                         current_row_subject_name_raw and len(current_row_subject_name_raw) >= 2 and
                         re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw) and 
                         not (current_row_subject_name_raw.isdigit() and len(current_row_subject_name_raw) in [3,4]) and 
-                        not re.match(r'^\w{3,5}$', current_row_subject_name_raw) 
+                        not re.match(r'^\w{3,5}$', current_row_subject_name_raw) and
+                        not (len(current_row_subject_name_raw) <=3 and not re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw)) # Avoid very short non-Chinese fragments
                     )
 
-                    # State machine logic
+                    # --- State machine logic ---
                     if has_complete_course_info_this_row:
                         # Case 1: This row completes a course. Finalize subject name.
                         final_subject_name = current_row_subject_name_raw
                         if temp_subject_name_buffer:
                             final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
                         
+                        # Extract academic year and semester for the completed course
                         acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
                         course_info = {
                             "學年度": acad_year, "學期": semester, "科目名稱": final_subject_name, 
                             "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
                         }
 
+                        # Add to appropriate list (passed/failed)
                         if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
                         else:
                             if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
@@ -216,30 +242,38 @@ def calculate_total_credits(df_list):
                         
                         temp_subject_name_buffer = "" # Clear buffer after a course is finalized.
 
-                    elif is_strong_new_course_signal: # 新課程訊號，並且不是完成當前課程的行
-                        if temp_subject_name_buffer: # 如果有緩衝區，說明之前的科目沒完成，清空它
-                            temp_subject_name_buffer = "" 
+                    elif is_strong_new_course_signal and not is_valid_subject_fragment_text:
+                        # Case 2: This row has a strong new course signal AND its subject name does NOT look like a valid fragment.
+                        # This typically means it's a definite new course, and any buffered subject was incomplete/noise.
+                        if temp_subject_name_buffer:
+                            temp_subject_name_buffer = "" # Discard previous incomplete buffer
+                        # We don't add the current_row_subject_name_raw to buffer here, because it was explicitly
+                        # determined *not* to be a valid subject fragment text. This prevents pollution.
                         
-                        if is_valid_subject_fragment_text: # 如果當前行的科目名稱有效，作為新課程的第一部分
-                             temp_subject_name_buffer = current_row_subject_name_raw
-
                     elif is_valid_subject_fragment_text:
                         # Case 3: Current row is a subject fragment. Append to buffer.
+                        # This happens if it doesn't complete a course (Case 1) and isn't a strong, non-fragment new course signal (Case 2).
                         temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
                         
                     else:
                         # Case 4: Irrelevant row. Clear buffer if any.
+                        # This covers rows that are neither a completion, nor a strong new course signal (that's not a fragment), nor a valid fragment.
                         if temp_subject_name_buffer:
                             temp_subject_name_buffer = "" 
                         
+                # After iterating through all rows in a DataFrame, check if there's any lingering subject fragment
                 if temp_subject_name_buffer:
+                    # In a real application, you might want to log this or try to salvage it.
+                    # For now, we just pass, as it's an incomplete entry at the end of a table.
                     # st.warning(f"表格 {df_idx + 1} 偵測到文件末尾未完成的科目名稱片段: '{temp_subject_name_buffer}'，已跳過。")
                     pass 
 
             except Exception as e:
                 import streamlit as st 
+                # Display a warning for the specific DataFrame if an error occurs during parsing its rows
                 st.warning(f"表格 {df_idx + 1} 的學分計算時發生錯誤: `{e}`。該表格的學分可能無法計入總數。請檢查學分和GPA欄位數據是否正確。錯誤訊息: `{e}`")
         else:
+            # If essential columns (credit or subject) are not found for a DataFrame, skip it silently or with a debug message
             pass 
             
     return total_credits, calculated_courses, failed_courses
