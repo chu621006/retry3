@@ -1,19 +1,20 @@
-# utils/grade_analysis.py
-
 import pandas as pd
 import re
 from .pdf_processing import normalize_text
 
 def is_passing_gpa(gpa_str):
-    gpa = normalize_text(gpa_str).upper()
+    g = normalize_text(gpa_str).upper()
     failing = {"D","D-","E","F","X","不通過","未通過","不及格"}
-    if not gpa: return False
-    if gpa in {"通過","抵免","PASS","EXEMPT"}: return True
-    if gpa in failing: return False
-    if re.fullmatch(r"[A-C][+\-]?", gpa): return True
-    if re.fullmatch(r"\d+(\.\d+)?", gpa):
-        try: return float(gpa) >= 60.0
-        except: pass
+    if not g:
+        return False
+    if g in {"通過","抵免","PASS","EXEMPT"}:
+        return True
+    if g in failing:
+        return False
+    if re.fullmatch(r"[A-C][+\-]?", g):
+        return True
+    if re.fullmatch(r"\d+(\.\d+)?", g):
+        return float(g) >= 60.0
     return False
 
 def parse_credit_and_gpa(text):
@@ -21,111 +22,110 @@ def parse_credit_and_gpa(text):
     if t.lower() in {"通過","抵免","pass","exempt"}:
         return 0.0, t
     m = re.match(r"([A-Fa-f][+\-]?)\s*(\d+(\.\d+)?)", t)
-    if m: return float(m.group(2)), m.group(1).upper()
+    if m:
+        return float(m.group(2)), m.group(1).upper()
     m = re.match(r"(\d+(\.\d+)?)\s*([A-Fa-f][+\-]?)", t)
-    if m: return float(m.group(1)), m.group(3).upper()
+    if m:
+        return float(m.group(1)), m.group(3).upper()
     m = re.search(r"(\d+(\.\d+)?)", t)
-    if m: return float(m.group(1)), ""
+    if m:
+        return float(m.group(1)), ""
     m = re.search(r"([A-Fa-f][+\-]?)", t)
-    if m: return 0.0, m.group(1).upper()
+    if m:
+        return 0.0, m.group(1).upper()
     return 0.0, ""
 
 def calculate_total_credits(df_list):
-    total_credits = 0.0
-    calculated_courses = []
-    failed_courses = []
-    seen = set()  # (學年度, 學期, 科目名稱) 去重
+    total = 0.0
+    passed = []
+    failed = []
+    seen = set()
 
-    # 關鍵字列表
     credit_keys = ["學分","credit"]
     subject_keys = ["科目名稱","課程名稱","subject"]
     gpa_keys     = ["GPA","成績","grade"]
     year_keys    = ["學年","year"]
     sem_keys     = ["學期","semester"]
 
-    for df_idx, df in enumerate(df_list):
-        if df.empty or df.shape[1] < 3:
+    for i, df in enumerate(df_list):
+        if df.empty or df.shape[1]<3:
             continue
 
-        # 先找出各欄位名
-        cols_norm = {re.sub(r"\s+","",c).lower():c for c in df.columns}
-        def find_col(keys):
+        cols = {re.sub(r"\s+","",c).lower():c for c in df.columns}
+        def pick(keys):
             for k in keys:
-                if k.lower() in cols_norm:
-                    return cols_norm[k.lower()]
+                if k.lower() in cols:
+                    return cols[k.lower()]
             return None
 
-        credit_col  = find_col(credit_keys)
-        subject_col = find_col(subject_keys)
-        gpa_col     = find_col(gpa_keys)
-        year_col    = find_col(year_keys)
-        sem_col     = find_col(sem_keys)
-        if not subject_col or (not credit_col and not gpa_col):
+        ccol = pick(credit_keys)
+        scol = pick(subject_keys)
+        gcol = pick(gpa_keys)
+        ycol = pick(year_keys)
+        mcol = pick(sem_keys)
+        if not scol or (not ccol and not gcol):
             continue
 
-        buffer_name = ""
+        buf = ""
         for _, row in df.iterrows():
             rd = {c: normalize_text(row[c]) if pd.notna(row[c]) else "" for c in df.columns}
+            raw = rd.get(scol,"")
+            # 去掉所有开头的非中文
+            subj = re.sub(r"^[^\u4e00-\u9fa5]+","", raw).strip()
 
-            subj_raw = rd.get(subject_col, "")
-            # 若 subj_raw 前面有「數字+空格」，通通去掉
-            subj_clean = re.sub(r'^\d{3,4}\s*', '', subj_raw).strip()
-
-            cred_txt = rd.get(credit_col, "") if credit_col else ""
-            gpa_txt  = rd.get(gpa_col, "")    if gpa_col else ""
-
-            cred, gpa = parse_credit_and_gpa(cred_txt)
-            pc, pg   = parse_credit_and_gpa(gpa_txt)
-            if pg: gpa = pg
-            if pc>0 and cred==0: cred = pc
-
-            # 判斷是否為完整一筆
-            is_complete = (
-                cred>0
-                or is_passing_gpa(gpa)
-                or cred_txt.lower() in {"通過","抵免"}
-                or gpa_txt.lower() in {"通過","抵免"}
-            )
-
-            # 空行清 buffer
-            if all(not rd.get(c,"") for c in [subject_col, credit_col, gpa_col] if c):
-                buffer_name = ""
+            # 跳过无中文或“未知科目”
+            if not re.search(r"[\u4e00-\u9fa5]", subj):
+                buf = ""
                 continue
 
-            if is_complete:
-                if buffer_name and cred==0:
-                    final_name = f"{buffer_name} {subj_clean}".strip()
-                else:
-                    final_name = subj_clean
-                buffer_name = ""
+            ct, gt = 0.0, ""
+            if ccol:
+                ct, gt = parse_credit_and_gpa(rd.get(ccol,""))
+            if gcol:
+                ct2, gt2 = parse_credit_and_gpa(rd.get(gcol,""))
+                if gt2:
+                    gt = gt2
+                if ct2>0 and ct==0:
+                    ct = ct2
 
-                acad = rd.get(year_col,"")
-                sem  = rd.get(sem_col,"")
+            complete = (
+                ct>0 
+                or is_passing_gpa(gt)
+                or rd.get(ccol,"").lower() in {"通過","抵免"}
+                or rd.get(gcol,"").lower() in {"通過","抵免"}
+            )
 
-                key = (acad, sem, final_name)
-                if key in seen:
-                    continue
-                seen.add(key)
+            if not complete:
+                buf = subj if not buf else f"{buf} {subj}"
+                continue
 
-                rec = {
-                    "學年度": acad,
-                    "學期": sem,
-                    "科目名稱": final_name or "未知科目",
-                    "學分": cred,
-                    "GPA": gpa,
-                    "來源表格": df_idx+1
-                }
-                if gpa and not is_passing_gpa(gpa):
-                    failed_courses.append(rec)
-                else:
-                    total_credits += cred
-                    calculated_courses.append(rec)
+            name = f"{buf} {subj}".strip() if buf else subj
+            buf = ""
+
+            year = rd.get(ycol,"")
+            sem  = rd.get(mcol,"")
+            key = (year, sem, name)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            rec = {
+                "學年度": year,
+                "學期": sem,
+                "科目名稱": name,
+                "學分": ct,
+                "GPA": gt,
+                "來源表格": i+1
+            }
+
+            if gt and not is_passing_gpa(gt):
+                failed.append(rec)
             else:
-                if subj_clean:
-                    buffer_name = (buffer_name+" "+subj_clean).strip() if buffer_name else subj_clean
+                total += ct
+                passed.append(rec)
 
-        if buffer_name:
-            import streamlit as st
-            st.warning(f"表格{df_idx+1} 殘留未完成科目「{buffer_name}」")
+        # 如果 buf 残留不空，发条 warning
+        if buf:
+            st.warning(f"表格{i+1} 残留未合并科目 「{buf}」")
 
-    return total_credits, calculated_courses, failed_courses
+    return total, passed, failed
