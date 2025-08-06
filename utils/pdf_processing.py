@@ -54,14 +54,14 @@ def process_pdf_file(uploaded_file):
                 full_text += normalize_text(txt) + "\n"
 
                 settings = {
-                    "vertical_strategy":"lines",
-                    "horizontal_strategy":"lines",
-                    "snap_tolerance":3,
-                    "join_tolerance":5,
-                    "edge_min_length":3,
-                    "text_tolerance":2,
-                    "min_words_vertical":1,
-                    "min_words_horizontal":1
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "snap_tolerance": 3,
+                    "join_tolerance": 5,
+                    "edge_min_length": 3,
+                    "text_tolerance": 2,
+                    "min_words_vertical": 1,
+                    "min_words_horizontal": 1
                 }
                 tables = page.extract_tables(settings)
                 if not tables:
@@ -73,16 +73,19 @@ def process_pdf_file(uploaded_file):
                         norm = [normalize_text(c) for c in row]
                         if any(norm):
                             rows.append(norm)
-                    if not rows or len(rows[0])<3:
+                    if not rows or len(rows[0]) < 3:
                         continue
 
                     header, data = rows[0], rows[1:]
                     cols = make_unique_columns(header)
                     cleaned = []
                     for r in data:
-                        if   len(r)>len(cols): cleaned.append(r[:len(cols)])
-                        elif len(r)<len(cols): cleaned.append(r+[""]*(len(cols)-len(r)))
-                        else:                  cleaned.append(r)
+                        if len(r) > len(cols):
+                            cleaned.append(r[:len(cols)])
+                        elif len(r) < len(cols):
+                            cleaned.append(r + [""] * (len(cols) - len(r)))
+                        else:
+                            cleaned.append(r)
                     try:
                         df = pd.DataFrame(cleaned, columns=cols)
                         if is_grades_table(df):
@@ -91,16 +94,16 @@ def process_pdf_file(uploaded_file):
                     except:
                         continue
 
-        # 如果抽到的表格数据行少于5条，就启用一次性 Regex fallback
+        # 若表格内容过少，则一次性 Regex fallback
         if not table_dfs or sum(len(df) for df in table_dfs) < 5:
             pattern = re.compile(
                 r"(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)",
                 re.UNICODE
             )
-            m = pattern.findall(full_text)
-            if m:
+            matches = pattern.findall(full_text)
+            if matches:
                 rows = []
-                for y, s, subj, cr, g in m:
+                for y, s, subj, cr, g in matches:
                     rows.append([y, s, normalize_text(subj), cr, g])
                 df_fallback = pd.DataFrame(rows, columns=["學年度","學期","科目名稱","學分","GPA"])
                 st.info("⚡ Regex fallback 補全整份 PDF")
@@ -108,4 +111,9 @@ def process_pdf_file(uploaded_file):
 
         return table_dfs
 
-    except pdfpl
+    except pdfplumber.PDFSyntaxError as e:
+        st.error(f"PDF 語法錯誤: {e}")
+    except Exception as e:
+        st.error(f"處理 PDF 時出錯: {e}")
+
+    return []
