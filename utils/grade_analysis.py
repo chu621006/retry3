@@ -207,14 +207,14 @@ def calculate_total_credits(df_list):
                     current_row_subject_name_raw = row_data.get(found_subject_column, "")
                     credit_col_content = row_data.get(found_credit_column, "")
                     gpa_col_content = row_data.get(found_gpa_column, "")
-                    
+                    year_col_content = row_data.get(found_year_column, "") # Get year content for new signal
+
                     # Extract credit and GPA from their respective columns
                     extracted_credit_this_row, extracted_gpa_this_row = parse_credit_and_gpa(credit_col_content)
                     _, gpa_from_gpa_col = parse_credit_and_gpa(gpa_col_content) 
                     if gpa_from_gpa_col: extracted_gpa_this_row = gpa_from_gpa_col.upper()
                     
                     # Define if this row contains enough info to be considered a complete course entry
-                    # This is the primary trigger for finalizing a course and clearing the buffer.
                     has_complete_course_info_this_row = (
                         extracted_credit_this_row > 0 or 
                         is_passing_gpa(extracted_gpa_this_row) or 
@@ -231,22 +231,53 @@ def calculate_total_credits(df_list):
                         not (len(current_row_subject_name_raw) <=3 and not re.search(r'[\u4e00-\u9fa5]', current_row_subject_name_raw)) # Avoid very short non-Chinese fragments
                     )
 
-                    # --- State machine logic based on new priority ---
-                    if has_complete_course_info_this_row:
-                        # Case 1: This row completes a course. Prioritize completing it.
+                    # --- State machine logic (New Year signal is highest priority) ---
+                    # New: If a 3 or 4 digit number is found in the '學年度' column, it's a strong new course signal.
+                    is_new_year_signal = (
+                        year_col_content and re.match(r'^\d{3,4}$', year_col_content)
+                    )
+
+                    if is_new_year_signal:
+                        # Case 1: New academic year detected. Force clear buffer to prevent pollution.
+                        if temp_subject_name_buffer:
+                            # If there was a buffered subject, it implies a previous multi-line course wasn't finalized.
+                            # We discard it to prevent pollution of the new academic year's courses.
+                            temp_subject_name_buffer = ""
+                        
+                        # Now, if the current row also has complete course info, process it.
+                        # This covers cases where the first row of a new year also contains course details.
+                        if has_complete_course_info_this_row:
+                            final_subject_name = current_row_subject_name_raw # No buffer for new year's first course unless it's itself multi-line
+                            
+                            acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
+                            course_info = {
+                                "學年度": acad_year, "學期": semester, "科目名稱": final_subject_name, 
+                                "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
+                            }
+                            if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
+                            else:
+                                if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
+                                calculated_courses.append(course_info)
+                            # Buffer is already clear from is_new_year_signal check.
+                            
+                        # If the new year signal is present, and it's not a complete course row,
+                        # but it's a valid subject fragment, start buffering for this new year.
+                        elif is_valid_subject_fragment_text:
+                            temp_subject_name_buffer = current_row_subject_name_raw
+
+
+                    elif has_complete_course_info_this_row:
+                        # Case 2: This row completes a course (no new year signal, or new year signal handled above).
                         final_subject_name = current_row_subject_name_raw
                         if temp_subject_name_buffer:
-                            # Concatenate buffered name with current row's subject name
                             final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
                         
-                        # Extract academic year and semester for the completed course
                         acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
                         course_info = {
                             "學年度": acad_year, "學期": semester, "科目名稱": final_subject_name, 
                             "學分": extracted_credit_this_row, "GPA": extracted_gpa_this_row, "來源表格": df_idx + 1
                         }
 
-                        # Add to appropriate list (passed/failed)
                         if extracted_gpa_this_row and not is_passing_gpa(extracted_gpa_this_row): failed_courses.append(course_info)
                         else:
                             if extracted_credit_this_row > 0: total_credits += extracted_credit_this_row
@@ -255,29 +286,25 @@ def calculate_total_credits(df_list):
                         temp_subject_name_buffer = "" # CRITICAL: Clear buffer immediately after finalizing a course.
 
                     elif is_valid_subject_fragment_text:
-                        # Case 2: This row is a valid subject fragment, but doesn't complete a course.
-                        # Append it to the buffer.
+                        # Case 3: This row is a valid subject fragment, but doesn't complete a course,
+                        # and no new year signal was detected. Append to buffer.
                         temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
                         
                     else:
-                        # Case 3: This row is neither a course completion nor a valid subject fragment.
-                        # It's an irrelevant row (e.g., empty, header, separator).
-                        # CRITICAL: Clear the buffer here to prevent unrelated fragments from contaminating the next course.
+                        # Case 4: Irrelevant row (not a course completion, not a valid subject fragment, no new year signal).
+                        # Clear buffer to prevent contamination from unrelated text.
                         if temp_subject_name_buffer:
                             temp_subject_name_buffer = "" 
                         
                 # After iterating through all rows in a DataFrame, check if there's any lingering subject fragment
                 if temp_subject_name_buffer:
-                    # If a buffer remains, it means the last course was never properly completed (e.g., EOF reached).
-                    # We can choose to log this, or just discard it as an incomplete entry. For now, discard.
+                    # Log or discard incomplete buffered subject at the end of a table.
                     pass 
 
             except Exception as e:
                 import streamlit as st 
-                # Display a warning for the specific DataFrame if an error occurs during parsing its rows
                 st.warning(f"表格 {df_idx + 1} 的學分計算時發生錯誤: `{e}`。該表格的學分可能無法計入總數。請檢查學分和GPA欄位數據是否正確。錯誤訊息: `{e}`")
         else:
-            # If essential columns (credit or subject) are not found for a DataFrame, skip it silently or with a debug message
-            pass 
+            pass # Skip if essential columns are not found
             
     return total_credits, calculated_courses, failed_courses
