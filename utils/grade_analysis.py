@@ -1,3 +1,4 @@
+import streamlit as st
 import pandas as pd
 import re
 from .pdf_processing import normalize_text
@@ -71,7 +72,7 @@ def calculate_total_credits(df_list):
             rd = {c: normalize_text(row[c]) if pd.notna(row[c]) else "" for c in df.columns}
             raw = rd.get(scol, "")
             subj = re.sub(r"^[^\u4e00-\u9fa5]+", "", raw).strip()
-            # 只保留含中文的行
+            # 跳過不含中文的行
             if not re.search(r"[\u4e00-\u9fa5]", subj):
                 buf = ""
                 continue
@@ -123,7 +124,6 @@ def calculate_total_credits(df_list):
                 passed.append(rec)
 
         if buf:
-            import streamlit as st
             st.warning(f"表格{i+1} 殘留未合并科目「{buf}」")
 
     return total, passed, failed
