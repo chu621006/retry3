@@ -1,70 +1,153 @@
+# utils/pdf_processing.py
+
 import streamlit as st
 import pandas as pd
 import pdfplumber
+import collections
 import re
 
-def normalize(text):
-    return re.sub(r"\s+", " ", text or "").strip()
+def normalize_text(cell_content):
+    if cell_content is None:
+        return ""
+    if hasattr(cell_content, 'text'):
+        text = str(cell_content.text)
+    elif isinstance(cell_content, str):
+        text = cell_content
+    else:
+        text = str(cell_content)
+    return re.sub(r'\s+', ' ', text).strip()
+
+def make_unique_columns(columns_list):
+    seen = collections.defaultdict(int)
+    unique_columns = []
+    for col in columns_list:
+        original = normalize_text(col)
+        if not original or len(original) < 2:
+            base = "Column"
+            idx = 1
+            while f"{base}_{idx}" in unique_columns:
+                idx += 1
+            name = f"{base}_{idx}"
+        else:
+            name = original
+        final = name
+        cnt = seen[name]
+        while final in unique_columns:
+            cnt += 1
+            final = f"{name}_{cnt}"
+        unique_columns.append(final)
+        seen[name] = cnt
+    return unique_columns
+
+def is_grades_table(df):
+    if df.empty or len(df.columns) < 3:
+        return False
+    normalized_columns = [re.sub(r'\s+', '', c).lower() for c in df.columns]
+    credit_kw = ["學分", "credit"]
+    gpa_kw    = ["gpa", "成績", "grade"]
+    subject_kw= ["科目名稱", "課程名稱", "subject", "course"]
+    year_kw   = ["學年", "year"]
+    sem_kw    = ["學期", "semester"]
+
+    has_credit = any(any(k in c for k in credit_kw) for c in normalized_columns)
+    has_gpa    = any(any(k in c for k in gpa_kw)    for c in normalized_columns)
+    has_subj   = any(any(k in c for k in subject_kw)for c in normalized_columns)
+    has_year   = any(any(k in c for k in year_kw)   for c in normalized_columns)
+    has_sem    = any(any(k in c for k in sem_kw)    for c in normalized_columns)
+
+    return has_subj and (has_credit or has_gpa) and has_year and has_sem
 
 def process_pdf_file(uploaded_file):
-    """
-    1) 用 pdfplumber.extract_text 拿到全文；
-    2) 按行拆分，用 buffer 把“跨行断开的课程名”粘回到同一行；
-    3) 再用正则提取所有：學年度、學期、課程名稱、學分、GPA；
-    4) 产出一个 DataFrame，交给后端计算学分。
-    """
+    all_grades_data = []
+    full_text = ""
+
     try:
-        full_text = ""
         with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                full_text += page.extract_text() + "\n"
+            # 先嘗試 extract_tables
+            for page_num, page in enumerate(pdf.pages):
+                # 同步累積全文
+                txt = page.extract_text() or ""
+                full_text += normalize_text(txt) + "\n"
 
-        # 先拆行
-        raw_lines = [normalize(l) for l in full_text.splitlines() if normalize(l)]
-        merged = []
-        buf = ""
-        # 如果一行末尾没学分＋GPA，就先存 buffer
-        pattern_end = re.compile(r".+\s+\d+(?:\.\d+)?\s+[A-F][+\-]?$")
-        for line in raw_lines:
-            if buf:
-                line = buf + " " + line
-                buf = ""
-            if not pattern_end.match(line):
-                buf = line
-            else:
-                merged.append(line)
-        # 万一最后还有 buffer，直接丢掉或 append?
-        # if buf: merged.append(buf)
+                table_settings = {
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "snap_tolerance": 3,
+                    "join_tolerance": 5,
+                    "edge_min_length": 3,
+                    "text_tolerance": 2,
+                    "min_words_vertical": 1,
+                    "min_words_horizontal": 1,
+                }
+                tables = page.extract_tables(table_settings)
+                if not tables:
+                    continue
 
-        # 然后对每一行，用正则提取：年、期、名、学分、GPA
-        entries = []
+                for tidx, table in enumerate(tables):
+                    rows = []
+                    for row in table:
+                        norm = [normalize_text(c) for c in row]
+                        if any(cell for cell in norm):
+                            rows.append(norm)
+                    if not rows or len(rows[0]) < 3:
+                        continue
+                    header, data_rows = rows[0], rows[1:]
+                    cols = make_unique_columns(header)
+                    cleaned = []
+                    for r in data_rows:
+                        if len(r) > len(cols):
+                            cleaned.append(r[:len(cols)])
+                        elif len(r) < len(cols):
+                            cleaned.append(r + [""] * (len(cols) - len(r)))
+                        else:
+                            cleaned.append(r)
+                    try:
+                        df = pd.DataFrame(cleaned, columns=cols)
+                        if is_grades_table(df):
+                            all_grades_data.append(df)
+                            st.success(f"頁面 {page_num+1} 表格 {tidx+1} 已識別並處理。")
+                    except Exception:
+                        continue
+
+        # 如果已成功從表格提取任何資料，直接回傳
+        if all_grades_data:
+            return all_grades_data
+
+        # 第二道 fallback：純文字 header+行分割
+        for page_text in full_text.split("\n"):
+            # 找到包含「學年度」「學分」「GPA」的 header
+            if re.search(r'學年度.*學分.*GPA', page_text):
+                hdr = re.split(r'\s{2,}', page_text)
+                data = []
+                for line in full_text.split("\n"):
+                    if re.match(r'^\d{3,4}\s', line):
+                        parts = re.split(r'\s{2,}', line)
+                        if len(parts) >= len(hdr):
+                            data.append(parts[:len(hdr)])
+                if data:
+                    cols = make_unique_columns(hdr)
+                    all_grades_data.append(pd.DataFrame(data, columns=cols))
+                    st.success("純文字 header fallback 已處理整份 PDF。")
+                    return all_grades_data
+
+        # 第三道 fallback：正則整頁匹配
         pattern = re.compile(
-            r"(\d{3,4})\s*"                 # 學年度
-            r"(上|下|春|夏|秋|冬)\s+"         # 學期
-            r"(.+?)\s+"                      # 科目名稱（最短匹配）
-            r"(\d+(?:\.\d+)?)\s+"            # 學分
-            r"([A-F][+\-]?|通過|抵免)$"      # GPA 或「通過」字样
+            r'(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)'
         )
-        for ln in merged:
-            m = pattern.match(ln)
-            if m:
-                y, sem, subj, cr, gpa = m.groups()
-                entries.append({
-                    "學年度": y,
-                    "學期": sem,
-                    "科目名稱": normalize(subj),
-                    "學分": float(cr),
-                    "GPA": gpa,
-                })
+        matches = pattern.findall(full_text)
+        if matches:
+            rows = []
+            for year, sem, subj, cred, gpa in matches:
+                rows.append([year, sem, subj, cred, gpa])
+            df = pd.DataFrame(rows, columns=["學年度","學期","科目名稱","學分","GPA"])
+            all_grades_data.append(df)
+            st.success("Regex fallback 已處理整份 PDF。")
+            return all_grades_data
 
-        if not entries:
-            st.warning("全文行级解析也未找到任何课程，请检查 PDF 是否是图档或扫描件。")
-            return []
-
-        df = pd.DataFrame(entries)
-        st.success(f"共解析到 {len(df)} 门课程（行级正则方式）")
-        return [df]
-
+    except pdfplumber.PDFSyntaxError as e:
+        st.error(f"PDF 語法錯誤: {e}")
     except Exception as e:
-        st.error(f"纯文本解析出错: {e}")
-        return []
+        st.error(f"處理 PDF 時發生錯誤: {e}")
+
+    # 最後：若未成功提取
+    return all_grades_data
