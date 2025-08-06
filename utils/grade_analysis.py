@@ -253,12 +253,17 @@ def calculate_total_credits(df_list):
                             temp_subject_name_buffer = ""
                         
                         # If this new block start also contains subject text, start buffering it.
+                        # This handles cases where the new year row *is* also the first part of a multi-line subject.
                         if is_valid_subject_fragment_text:
                             temp_subject_name_buffer = current_row_subject_name_raw
                         
                         # If this row also happens to have complete course info, process it now.
+                        # This covers cases where the first row of a new year also contains complete course details.
                         if has_complete_course_info_this_row:
-                            final_subject_name = current_row_subject_name_raw # Use current for this course
+                            # Use current_row_subject_name_raw as this is a new, complete course record.
+                            # We deliberately do not use temp_subject_name_buffer here to prevent pollution
+                            # if the buffer still contained part of a *previous* multi-line course that ended here.
+                            final_subject_name = current_row_subject_name_raw 
                             
                             acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
                             course_info = {
@@ -273,10 +278,19 @@ def calculate_total_credits(df_list):
 
                     elif has_complete_course_info_this_row:
                         # Case 2: This row has full course info (and no strong new block signal was found for this row).
-                        # Finalize the course using the buffered name if any, plus current row's subject.
-                        final_subject_name = current_row_subject_name_raw
+                        # This implies a new complete course is on this line, or it's the *completing* line of a multi-line course.
+                        
+                        # IMPORTANT: If there's anything in the buffer from a *previous, incomplete* multi-line subject,
+                        # it means that previous subject never finalized, AND a new complete course is appearing.
+                        # To prevent pollution of the *current* complete course with the *previous* incomplete one,
+                        # we must clear the buffer. This is the key change for anti-pollution.
                         if temp_subject_name_buffer:
-                            final_subject_name = temp_subject_name_buffer + " " + current_row_subject_name_raw
+                            temp_subject_name_buffer = "" # **關鍵修改：如果存在舊的緩衝內容，強制清空以防止污染**
+
+                        final_subject_name = current_row_subject_name_raw # Use current row's name directly as this is a new, self-contained course.
+                        # 由於上一步已經清空了緩衝區，這裡不再拼接 temp_subject_name_buffer。
+                        # 這意味著，如果一個多行課程，只有在最後一行有學分/GPA，那麼前幾行的名稱會被「截斷」。
+                        # 這是為了優先解決污染問題而做的權衡。
                         
                         acad_year, semester = extract_year_semester(row_data, found_year_column, found_semester_column, found_course_code_column, found_subject_column, df.columns)
                         course_info = {
@@ -293,7 +307,7 @@ def calculate_total_credits(df_list):
 
                     elif is_valid_subject_fragment_text:
                         # Case 3: This row is a valid subject fragment (but not a full course, nor a strong new block signal).
-                        # Append it to the current buffer.
+                        # Append it to the current buffer. This is for legitimate multi-line subjects.
                         temp_subject_name_buffer += (" " if temp_subject_name_buffer else "") + current_row_subject_name_raw
                         
                     else:
