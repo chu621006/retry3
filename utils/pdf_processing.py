@@ -59,10 +59,16 @@ def is_grades_table(df):
 
 def process_pdf_file(uploaded_file):
     all_grades_data = []
+    full_text = ""
 
     try:
         with pdfplumber.open(uploaded_file) as pdf:
+            # 先嘗試 extract_tables
             for page_num, page in enumerate(pdf.pages):
+                # 同步累積全文
+                txt = page.extract_text() or ""
+                full_text += normalize_text(txt) + "\n"
+
                 table_settings = {
                     "vertical_strategy": "lines",
                     "horizontal_strategy": "lines",
@@ -73,61 +79,75 @@ def process_pdf_file(uploaded_file):
                     "min_words_vertical": 1,
                     "min_words_horizontal": 1,
                 }
-
-                # 優先用 extract_tables
                 tables = page.extract_tables(table_settings)
-                if tables:
-                    for tidx, table in enumerate(tables):
-                        rows = []
-                        for row in table:
-                            norm = [normalize_text(c) for c in row]
-                            if any(cell for cell in norm):
-                                rows.append(norm)
-                        if not rows or len(rows[0]) < 3:
-                            continue
-                        header, data_rows = rows[0], rows[1:]
-                        cols = make_unique_columns(header)
-                        cleaned = []
-                        for r in data_rows:
-                            if len(r) > len(cols):
-                                cleaned.append(r[:len(cols)])
-                            elif len(r) < len(cols):
-                                cleaned.append(r + [""] * (len(cols) - len(r)))
-                            else:
-                                cleaned.append(r)
-                        try:
-                            df = pd.DataFrame(cleaned, columns=cols)
-                            if is_grades_table(df):
-                                all_grades_data.append(df)
-                                st.success(f"頁面 {page_num+1} 表格 {tidx+1} 已識別並處理。")
-                        except Exception:
-                            continue
+                if not tables:
+                    continue
 
-                else:
-                    # fallback 純文字解析
-                    text = page.extract_text()
-                    if text and "學年度" in text and "GPA" in text:
-                        lines = [normalize_text(l) for l in text.splitlines() if normalize_text(l)]
-                        for idx, line in enumerate(lines):
-                            if re.search(r'學年度.*學分.*GPA', line):
-                                hdr = re.split(r'\s{2,}', line)
-                                data = []
-                                for row in lines[idx+1:]:
-                                    if not re.match(r'^\d{3,4}\s', row):
-                                        break
-                                    parts = re.split(r'\s{2,}', row)
-                                    if len(parts) >= len(hdr):
-                                        data.append(parts[:len(hdr)])
-                                if data:
-                                    cols = make_unique_columns(hdr)
-                                    df = pd.DataFrame(data, columns=cols)
-                                    all_grades_data.append(df)
-                                    st.success(f"頁面 {page_num+1} 純文字解析已處理。")
-                                break
+                for tidx, table in enumerate(tables):
+                    rows = []
+                    for row in table:
+                        norm = [normalize_text(c) for c in row]
+                        if any(cell for cell in norm):
+                            rows.append(norm)
+                    if not rows or len(rows[0]) < 3:
+                        continue
+                    header, data_rows = rows[0], rows[1:]
+                    cols = make_unique_columns(header)
+                    cleaned = []
+                    for r in data_rows:
+                        if len(r) > len(cols):
+                            cleaned.append(r[:len(cols)])
+                        elif len(r) < len(cols):
+                            cleaned.append(r + [""] * (len(cols) - len(r)))
+                        else:
+                            cleaned.append(r)
+                    try:
+                        df = pd.DataFrame(cleaned, columns=cols)
+                        if is_grades_table(df):
+                            all_grades_data.append(df)
+                            st.success(f"頁面 {page_num+1} 表格 {tidx+1} 已識別並處理。")
+                    except Exception:
+                        continue
+
+        # 如果已成功從表格提取任何資料，直接回傳
+        if all_grades_data:
+            return all_grades_data
+
+        # 第二道 fallback：純文字 header+行分割
+        for page_text in full_text.split("\n"):
+            # 找到包含「學年度」「學分」「GPA」的 header
+            if re.search(r'學年度.*學分.*GPA', page_text):
+                hdr = re.split(r'\s{2,}', page_text)
+                data = []
+                for line in full_text.split("\n"):
+                    if re.match(r'^\d{3,4}\s', line):
+                        parts = re.split(r'\s{2,}', line)
+                        if len(parts) >= len(hdr):
+                            data.append(parts[:len(hdr)])
+                if data:
+                    cols = make_unique_columns(hdr)
+                    all_grades_data.append(pd.DataFrame(data, columns=cols))
+                    st.success("純文字 header fallback 已處理整份 PDF。")
+                    return all_grades_data
+
+        # 第三道 fallback：正則整頁匹配
+        pattern = re.compile(
+            r'(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)'
+        )
+        matches = pattern.findall(full_text)
+        if matches:
+            rows = []
+            for year, sem, subj, cred, gpa in matches:
+                rows.append([year, sem, subj, cred, gpa])
+            df = pd.DataFrame(rows, columns=["學年度","學期","科目名稱","學分","GPA"])
+            all_grades_data.append(df)
+            st.success("Regex fallback 已處理整份 PDF。")
+            return all_grades_data
 
     except pdfplumber.PDFSyntaxError as e:
         st.error(f"PDF 語法錯誤: {e}")
     except Exception as e:
         st.error(f"處理 PDF 時發生錯誤: {e}")
 
+    # 最後：若未成功提取
     return all_grades_data
